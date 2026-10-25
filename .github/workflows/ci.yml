@@ -120,6 +120,9 @@ jobs:
 
   trivy:
     name: Trivy (lockfiles, secrets)
+    permissions:
+      contents: read
+      security-events: write
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
@@ -132,7 +135,16 @@ jobs:
         run: |
           set -euo pipefail
           docker pull --quiet "$TRIVY_IMAGE"
-          python3 -I tools/ci/trivy_scan.py --trivy "$TRIVY_IMAGE"
+          python3 -I tools/ci/trivy_scan.py --trivy "$TRIVY_IMAGE" --sarif trivy-results/trivy.sarif
+      - name: Upload Trivy results to code scanning
+        if: >-
+          ${{ !cancelled() && hashFiles('trivy-results/trivy.sarif') != ''
+          && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: trivy-results/trivy.sarif
+          category: trivy/fs
 
   # The required check that stands for every job of this workflow. Reads every result
   # (tools/ci/status.sh). A new job needs a line here and a rule there; the workflows job
