@@ -12,7 +12,7 @@ No .trivyignore is read, so no finding is excepted.
 
 Adapted from lusoris/SnatchArr at 86dc3376 (EUPL-1.2, same author).
 
-Usage: python3 -I tools/ci/trivy_scan.py --trivy NAME:TAG@sha256:DIGEST
+Usage: python3 -I tools/ci/trivy_scan.py --trivy NAME:TAG@sha256:DIGEST [--sarif PATH]
 """
 
 import argparse
@@ -37,6 +37,8 @@ SCAN_FLAGS = ["--scanners", "vuln,secret,misconfig", "--severity", "HIGH,CRITICA
 LOCKFILES = {"nuget": "packages.lock.json"}
 # Unpacks the tar on stdin and runs trivy on it; arguments come in as "$@".
 UNPACK_AND_SCAN = "mkdir -p /scan && tar -xf - -C /scan && cd /scan && exec trivy \"$@\""
+# Converts a Trivy JSON report on stdin to SARIF on stdout.
+CONVERT_TO_SARIF = "cat > /tmp/r.json && exec trivy convert --format sarif --output /dev/stdout /tmp/r.json"
 
 NUGET_LOCK = """{
   "version": 1,
@@ -155,9 +157,52 @@ def fail_on(found):
         raise ScanError(f"{len(found)} finding(s)")
 
 
-def scan_fs(docker, trivy, root):
+def validate_sarif(data):
+    if len(data) > MAX_REPORT_BYTES:
+        raise ScanError(f"SARIF report exceeds {MAX_REPORT_BYTES} bytes")
+    try:
+        report = json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError) as err:
+        raise ScanError(f"SARIF output is not valid JSON: {err}") from err
+    if not isinstance(report, dict):
+        raise ScanError("SARIF report is not a JSON object")
+    if report.get("version") != "2.1.0":
+        raise ScanError(f"SARIF version is {report.get('version')!r}, expected '2.1.0'")
+    runs = report.get("runs")
+    if not isinstance(runs, list) or len(runs) == 0:
+        raise ScanError("SARIF runs is empty or not a list")
+    first_run = runs[0]
+    if not isinstance(first_run, dict):
+        raise ScanError("SARIF run is not an object")
+    tool = first_run.get("tool")
+    driver = tool.get("driver") if isinstance(tool, dict) else None
+    name = driver.get("name") if isinstance(driver, dict) else None
+    if name != "Trivy":
+        raise ScanError(f"SARIF tool driver name is {name!r}, expected 'Trivy'")
+    return report
+
+
+def trivy_convert_sarif(docker, trivy, report):
+    report_bytes = json.dumps(report).encode("utf-8")
+    command = [docker, "run", "--rm", "-i", "--entrypoint", "sh", trivy,
+               "-ec", CONVERT_TO_SARIF]
+    result = run(command, report_bytes)
+    stderr = result.stderr.decode("utf-8", "replace")[-4000:]
+    if result.returncode != 0 or len(result.stdout) > MAX_REPORT_BYTES:
+        sys.stderr.write(stderr)
+        raise ScanError(f"trivy convert exited {result.returncode}")
+    validate_sarif(result.stdout)
+    return result.stdout
+
+
+def scan_fs(docker, trivy, root, sarif=None):
     names = tracked(root)
     report = trivy_fs(docker, trivy, tar_of(root, names))
+    if sarif:
+        sarif_bytes = trivy_convert_sarif(docker, trivy, report)
+        sarif_path = pathlib.Path(sarif)
+        sarif_path.parent.mkdir(parents=True, exist_ok=True)
+        sarif_path.write_bytes(sarif_bytes)
     fail_on(findings(report))
     expected = {kind: {n for n in names if pathlib.PurePosixPath(n).name == base}
                 for kind, base in LOCKFILES.items()}
@@ -174,6 +219,7 @@ def parse_args():
     parser.add_argument("--trivy", required=True, help="Trivy image pinned by digest")
     parser.add_argument("--docker", default="docker")
     parser.add_argument("--root", default=".")
+    parser.add_argument("--sarif", default=None, help="write SARIF report to PATH")
     return parser.parse_args()
 
 
@@ -183,7 +229,7 @@ def main():
         if not IMAGE_RE.match(args.trivy):
             raise ScanError(f"image '{args.trivy}' is not pinned as NAME:TAG@sha256:DIGEST")
         self_test_fs(args.docker, args.trivy)
-        scan_fs(args.docker, args.trivy, pathlib.Path(args.root).resolve())
+        scan_fs(args.docker, args.trivy, pathlib.Path(args.root).resolve(), sarif=args.sarif)
     except ScanError as err:
         print(f"Trivy scan failed: {err}", file=sys.stderr)
         return 1

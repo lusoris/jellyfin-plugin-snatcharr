@@ -30,7 +30,8 @@ ci-scripts-verify: ## Planted cases of the CI scripts (no container image needed
 	sh tools/ci/status_test.sh
 	sh tools/ci/status.sh mirror .github/workflows/ci.yml
 	sh tools/ci/semgrep_scan_test.sh
-	python3 -I -m py_compile tools/ci/secret_scan.py tools/ci/semgrep_scan.py tools/ci/trivy_scan.py
+	python3 -I tools/ci/trivy_scan_test.py
+	python3 -I -m py_compile tools/ci/secret_scan.py tools/ci/semgrep_scan.py tools/ci/trivy_scan.py tools/ci/trivy_scan_test.py
 
 # Not part of verify-all: needs Docker, the network and a forge token (GH_TOKEN, read access).
 # The CI job "workflows" runs it on every pull request.

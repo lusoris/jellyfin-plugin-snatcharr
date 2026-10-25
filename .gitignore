@@ -1,4 +1,5 @@
 __pycache__/
+trivy-results/
 
 # BEGIN praetor private artifacts (praetorctl adopt)
 .workingdir/
