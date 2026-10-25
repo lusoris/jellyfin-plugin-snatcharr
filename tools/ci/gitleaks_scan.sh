@@ -4,7 +4,7 @@
 #
 # Fetches the pinned gitleaks release into CACHE_DIR, checks its digest and version, then runs
 # secret_scan.py: its planted self-test first, then the scan of the history. CI (job
-# secret-scan) and `make secret-scan` both call this script, so the pin lives here only.
+# secret-scan) calls this script, so the pin lives here only.
 #
 #   tools/ci/gitleaks_scan.sh CACHE_DIR
 #

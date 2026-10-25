@@ -15,20 +15,13 @@ WORKFLOW="$HERE/../../.github/workflows/ci.yml"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# Every job ran and succeeded; the change filter selected every component.
+# Every job ran and succeeded.
 ALL="$(jq -n '
-  [ "workflows", "secret-scan", "semgrep", "trivy", "changes", "commits", "api-lint", "api-test", "api-security", "api-openapi",
-    "worker", "e2e", "image-smoke", "dev-compose", "dlclients-live", "arr-forceimport-live", "integrations-live", "web", "web-e2e-api", "web-visual", "proto", "deploy", "contracts", "governance", "docs", "licences" ]
+  [ "workflows", "secret-scan", "semgrep", "trivy", "commits" ]
   | map({key: ., value: {result: "success", outputs: {}}}) | from_entries
-  | .changes.outputs = ( [ "api", "worker", "web", "proto", "deploy", "governance", "contracts", "docs", "licences" ]
-                         | map({key: ., value: "true"}) | from_entries )
 ')"
-# No component selected: every filtered job is skipped.
-NONE="$(printf '%s' "$ALL" | jq '
-  .changes.outputs |= map_values("false")
-  | (.["api-lint"], .["api-test"], .["api-security"], .["api-openapi"], .worker, .e2e, .["image-smoke"], .["dev-compose"], .["dlclients-live"], .["arr-forceimport-live"], .["integrations-live"], .web, .["web-e2e-api"], .["web-visual"],
-     .proto, .deploy, .contracts, .governance, .docs, .licences).result = "skipped"
-')"
+# Push or bot pull request: commits skipped.
+COMMITS_SKIPPED="$(printf '%s' "$ALL" | jq '.commits.result = "skipped"')"
 
 accepted=0
 refused=0
@@ -55,38 +48,21 @@ expect() {
 }
 
 expect 0 "every job ran" true "$ALL"
-expect 0 "no component changed" true "$NONE"
-expect 0 "bot pull request or push: commits skipped" false "$NONE" '.commits.result = "skipped"'
-expect 0 "only proto changed: e2e ran, the api jobs did not" true "$NONE" \
-  '.changes.outputs.proto = "true" | (.proto, .e2e, .["image-smoke"]).result = "success"'
+expect 0 "bot pull request or push: commits skipped" false "$COMMITS_SKIPPED"
 
 expect 1 "workflows failed" true "$ALL" '.workflows.result = "failure"' "job workflows: failure, must succeed"
-expect 1 "workflows skipped" true "$NONE" '.workflows.result = "skipped"' "job workflows: skipped, must succeed"
-expect 1 "changes failed, the rest skipped" true "$NONE" \
-  '.changes = {result: "failure", outputs: {}}' "job changes: failure, must succeed"
-expect 1 "api selected, api-test skipped" true "$ALL" \
-  '.["api-test"].result = "skipped"' "job api-test: skipped, must succeed"
-expect 1 "api selected, the live download clients skipped" true "$ALL" \
-  '.["dlclients-live"].result = "skipped"' "job dlclients-live: skipped, must succeed"
-expect 1 "api selected, the live force import skipped" true "$ALL" \
-  '.["arr-forceimport-live"].result = "skipped"' "job arr-forceimport-live: skipped, must succeed"
-expect 1 "only proto changed, e2e skipped" true "$NONE" \
-  '.changes.outputs.proto = "true" | (.proto, .["image-smoke"]).result = "success"' "job e2e: skipped, must succeed"
-expect 1 "docs changed, docs skipped" true "$NONE" \
-  '.changes.outputs.docs = "true"' "job docs: skipped, must succeed"
-expect 1 "licences changed, licences skipped" true "$NONE" \
-  '.changes.outputs.licences = "true"' "job licences: skipped, must succeed"
-expect 1 "web cancelled" true "$ALL" '.web.result = "cancelled"' "job web: cancelled, must succeed"
-expect 1 "unselected job failed" true "$NONE" \
-  '.deploy.result = "failure"' "job deploy: failure, may only be skipped"
-expect 1 "commits skipped on a maintainer pull request" true "$NONE" \
+expect 1 "workflows skipped" true "$ALL" '.workflows.result = "skipped"' "job workflows: skipped, must succeed"
+expect 1 "secret-scan failed" true "$ALL" '.["secret-scan"].result = "failure"' "job secret-scan: failure, must succeed"
+expect 1 "semgrep failed" true "$ALL" '.semgrep.result = "failure"' "job semgrep: failure, must succeed"
+expect 1 "trivy failed" true "$ALL" '.trivy.result = "failure"' "job trivy: failure, must succeed"
+expect 1 "commits skipped on a maintainer pull request" true "$ALL" \
   '.commits.result = "skipped"' "job commits: skipped, must succeed"
 expect 1 "commits failed (draft)" true "$ALL" '.commits.result = "failure"' "job commits: failure, must succeed"
-expect 1 "commits failed although not expected" false "$NONE" \
+expect 1 "commits failed although not expected" false "$COMMITS_SKIPPED" \
   '.commits.result = "failure"' "job commits: failure, may only be skipped"
 expect 1 "job without a rule" true "$ALL" \
   '.stray = {result: "success", outputs: {}}' "job stray: no rule in tools/ci/status.sh"
-expect 1 "job missing from needs" true "$ALL" 'del(.governance)' "job governance: not in needs, must succeed"
+expect 1 "job missing from needs" true "$ALL" 'del(.trivy)' "job trivy: not in needs, must succeed"
 expect 1 "results are not an object" true '[]' . "the job results could not be read"
 
 # Unreadable input and a missing COMMITS_EXPECTED must not pass either.
@@ -131,28 +107,18 @@ sh "$HERE/status.sh" mirror "$WORKFLOW" > /dev/null
 accepted=$((accepted + 1))
 echo "ok   the CI workflow matches the rule table"
 
-mirror_refuses "job dropped from the needs of status" "job governance: not needed by the status job" \
-  '!/^      - governance$/'
+mirror_refuses "job dropped from the needs of status" "job trivy: not needed by the status job" \
+  '!/^      - trivy$/'
 mirror_refuses "job that is not in the rule table" "job stray: no rule in tools/ci/status.sh" \
-  '{ sub(/^  governance:$/, "  stray:"); print }'
-mirror_refuses "condition of a job changed" \
-  "job e2e: the workflow does not carry the condition of its rule (api,worker,proto)" \
-  '/^    if: needs.changes.outputs.api == .true. .. needs.changes.outputs.worker / {
-     print "    if: needs.changes.outputs.api == \047true\047"; next } { print }'
+  '{ sub(/^  trivy:$/, "  stray:"); print }'
 mirror_refuses "filter put on the workflows job" \
   "job workflows: the workflow does not carry the condition of its rule (always)" \
-  '{ print } /^    name: Workflows / { print "    if: needs.changes.outputs.governance == \047true\047" }'
+  '{ print } /^    name: Workflows / { print "    if: github.event_name == \047push\047" }'
 mirror_refuses "status no longer runs always" 'status: must run with "if: always()"' \
   '{ sub(/^    if: always\(\)$/, "    if: success()"); print }'
 mirror_refuses "commits condition differs from the expectation" \
   "job commits: the workflow does not carry the condition of its rule (commits)" \
   '/^    if: github.event_name == / { print "    if: github.event_name == \047pull_request\047"; next } { print }'
-# Planted draft cases (#147): the changes job stops a draft for every component job it feeds.
-mirror_refuses "draft step dropped from the changes job" \
-  'job changes: the first step is not "Stop on a draft pull request"' \
-  '/^  changes:$/ { in_changes = 1 } /^  [a-z-]+:$/ && !/^  changes:$/ { in_changes = 0 }
-   in_changes && /^      - (name: Stop on a draft pull request|\*stop-draft)$/ { skip = 1; next }
-   skip && /^      - / { skip = 0 } !skip { print }'
 mirror_refuses "draft step dropped from the semgrep job" \
   'job semgrep: the first step is not "Stop on a draft pull request"' \
   '/^  semgrep:$/ { in_job = 1 } /^  [a-z-]+:$/ && !/^  semgrep:$/ { in_job = 0 }

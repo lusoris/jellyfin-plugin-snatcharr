@@ -3,9 +3,7 @@
 # SPDX-License-Identifier: EUPL-1.2
 #
 # Decides "CI success", the required check that stands for every job of the CI workflow.
-# A job the change filter leaves out ends as skipped, and a skipped job satisfies a required
-# check on its own. This script reads every job result instead: a job passes when it succeeded,
-# or when it was skipped and nothing selected it.
+# A job passes when it succeeded, or when it was skipped and its rule did not select it.
 #
 #   NEEDS='<toJSON(needs)>' COMMITS_EXPECTED=true|false tools/ci/status.sh
 #   tools/ci/status.sh mirror WORKFLOW     the workflow must match the rule table below
@@ -13,34 +11,13 @@
 # Exit status: 0 passed, 1 refused, 2 usage. Needs jq (first form) and awk (second form).
 set -eu
 
-# One job per line with what selects it: "always", "commits" (COMMITS_EXPECTED), or the outputs
-# of the changes job, any of which selects the job. The mirror form holds ci.yml to this table.
+# One job per line with what selects it: "always" or "commits" (COMMITS_EXPECTED).
+# The mirror form holds ci.yml to this table.
 RULES='workflows always
 secret-scan always
 semgrep always
 trivy always
-changes always
-commits commits
-api-lint api
-api-test api
-api-security api
-api-openapi api
-worker worker
-e2e api,worker,proto
-image-smoke api,worker,proto,web,deploy
-dev-compose deploy
-dlclients-live api
-arr-forceimport-live api
-integrations-live api,web
-web web
-web-e2e-api api,web
-web-visual web
-proto proto
-deploy deploy
-contracts contracts
-governance governance
-docs docs
-licences licences'
+commits commits'
 
 DRAFT_STEP='Stop on a draft pull request'
 
@@ -54,7 +31,6 @@ decide() {
   esac
   if ! refused="$(jq -n -r --arg needs "${NEEDS:-}" --arg rules "$RULES" --arg commits "$COMMITS_EXPECTED" '
     ($needs | fromjson) as $needs
-    | ($needs.changes.outputs // {}) as $selected
     | ($rules | split("\n") | map(split(" ") | {job: .[0], on: .[1]})) as $table
     | (
         $table[]
@@ -62,7 +38,7 @@ decide() {
         | ($needs[$rule.job].result // "not in needs") as $got
         | (if $rule.on == "always" then true
            elif $rule.on == "commits" then $commits == "true"
-           else any($rule.on | split(",")[]; $selected[.] == "true") end) as $must
+           else false end) as $must
         | select(($got == "success" or (($must | not) and $got == "skipped")) | not)
         | "job \($rule.job): \($got)" + (if $must then ", must succeed" else ", may only be skipped" end)
       ),
@@ -153,8 +129,7 @@ mirror() {
   fi
   steps="$(first_steps "$file")"
   while read -r job on; do
-    # A draft runs no gate: a job the change filter decides needs the changes job, which stops
-    # the draft in its first step, so GitHub skips it; every other job stops the draft itself.
+    # A draft runs no gate: every gated job stops the draft in its first step.
     case "$on" in
       always | commits)
         if ! printf '%s\n' "$steps" | grep -qxF "$job|$DRAFT_STEP"; then

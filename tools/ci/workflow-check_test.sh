@@ -235,12 +235,14 @@ renovate_go_reads() {
 }
 # Every go install pinned to a release in this repository's workflows must be read: a pattern that
 # matches nothing stops the updates without an error.
-pinned=$(cat "$REPO_ROOT"/.github/workflows/*.yml | grep -cE 'go install [^ ]+@v[0-9]')
-if [ "$pinned" -lt 1 ] || [ "$(renovate_go_reads "$REPO_ROOT"/.github/workflows/*.yml)" != "$pinned" ]; then
-  echo "FAIL renovate: renovate.json does not read all $pinned go install pins in the workflows" >&2
-  exit 1
+pinned=$( (cat "$REPO_ROOT"/.github/workflows/*.yml | grep -cE 'go install [^ ]+@v[0-9]') || true)
+if [ "$pinned" -gt 0 ]; then
+  if [ "$(renovate_go_reads "$REPO_ROOT"/.github/workflows/*.yml)" != "$pinned" ]; then
+    echo "FAIL renovate: renovate.json does not read all $pinned go install pins in the workflows" >&2
+    exit 1
+  fi
+  echo "ok   renovate: all $pinned go install pins in the workflows are read"
 fi
-echo "ok   renovate: all $pinned go install pins in the workflows are read"
 if [ "$(renovate_go_reads "$WORK/go-install-latest/.github/workflows/planted.yml" "$WORK/go-install-variable/.github/workflows/planted.yml")" != 0 ]; then
   echo "FAIL renovate: a go install at @latest or at a variable is read" >&2
   exit 1
@@ -264,4 +266,8 @@ if jq -e -n --arg file "tools/ci/zizmor.txt" --arg pat "$PIP_PATTERN" '$file | t
 fi
 echo "ok   renovate: pip_requirements reads tools/ci/zizmor-requirements.txt and ignores zizmor.txt"
 
-echo "workflow check: 6 accepted, 15 refused; Renovate reads 1 image pin, zizmor-requirements.txt and $pinned go install pins"
+if [ "$pinned" -gt 0 ]; then
+  echo "workflow check: 6 accepted, 15 refused; Renovate reads 1 image pin, zizmor-requirements.txt and $pinned go install pins"
+else
+  echo "workflow check: 6 accepted, 15 refused; Renovate reads 1 image pin and zizmor-requirements.txt"
+fi

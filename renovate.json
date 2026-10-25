@@ -11,43 +11,12 @@
     "before 6am on monday"
   ],
   "enabledManagers": [
-    "gomod",
-    "cargo",
-    "npm",
+    "nuget",
     "github-actions",
-    "dockerfile",
-    "docker-compose",
-    "helm-values",
-    "helmv3",
-    "devcontainer",
     "pip_requirements",
-    "custom.regex",
-    "rust-toolchain"
+    "custom.regex"
   ],
   "customManagers": [
-    {
-      "description": "cargo-zigbuild in the worker image (cargo install <crate>@<version>)",
-      "customType": "regex",
-      "managerFilePatterns": [
-        "worker/Dockerfile"
-      ],
-      "matchStrings": [
-        "cargo install (?<depName>cargo-zigbuild)@(?<currentValue>\\S+) "
-      ],
-      "datasourceTemplate": "crate"
-    },
-    {
-      "description": "Upstream OpenAPI spec pin manifest from golusoris/goenvoy: repository and commit of the source manifest on branch main (docs/upstream-contracts.md)",
-      "customType": "regex",
-      "managerFilePatterns": [
-        "tools/upstreamspec/specs.yaml"
-      ],
-      "matchStrings": [
-        "source:\\n +repository: (?<depName>\\S+)\\n +commit: (?<currentDigest>[0-9a-f]{40})\\n"
-      ],
-      "currentValueTemplate": "main",
-      "datasourceTemplate": "github-digest"
-    },
     {
       "description": "The image of the workflow gate, pinned by version and digest on one line (tools/ci/workflow-check.sh)",
       "customType": "regex",
@@ -61,135 +30,35 @@
       "versioningTemplate": "docker"
     },
     {
-      "description": "Go tools installed in workflows, pinned to semver (tools/ci/workflow-check.sh)",
+      "description": "gitleaks release archive in tools/ci/gitleaks_scan.sh",
       "customType": "regex",
       "managerFilePatterns": [
-        "/^\\.github/workflows/[^/]+\\.ya?ml$/"
+        "tools/ci/gitleaks_scan.sh"
       ],
       "matchStrings": [
-        "go install (?<depName>\\S+)/cmd/[^@\\s]+@(?<currentValue>v[0-9]+(?:\\.[0-9]+)*)"
+        "GITLEAKS_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)\\n"
       ],
-      "datasourceTemplate": "go"
+      "depNameTemplate": "gitleaks/gitleaks",
+      "datasourceTemplate": "github-releases"
     },
     {
-      "description": "Go tools of the devcontainer, pinned to semver; the module path ends before /cmd/ (.devcontainer/snatcharr/post-create.sh)",
-      "customType": "regex",
-      "managerFilePatterns": [
-        ".devcontainer/snatcharr/post-create.sh"
-      ],
-      "matchStrings": [
-        "go install (?<depName>[^@\\s]+?)(?:/cmd/[^@\\s]+)?@(?<currentValue>v[0-9]+(?:\\.[0-9]+)*)\\n"
-      ],
-      "datasourceTemplate": "go"
-    },
-    {
-      "description": "Cargo tools of the devcontainer (.devcontainer/snatcharr/post-create.sh)",
-      "customType": "regex",
-      "managerFilePatterns": [
-        ".devcontainer/snatcharr/post-create.sh"
-      ],
-      "matchStrings": [
-        "cargo install --locked (?<depName>[a-z0-9_-]+)@(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)\\n"
-      ],
-      "datasourceTemplate": "crate"
-    },
-    {
-      "description": "kubectl and helm of the devcontainer feature, which Renovate's devcontainer manager does not version",
-      "customType": "regex",
-      "managerFilePatterns": [
-        ".devcontainer/snatcharr/devcontainer.json"
-      ],
-      "matchStrings": [
-        "kubectl-helm-minikube:1\": \\{ \"version\": \"(?<currentValue>[0-9.]+)\""
-      ],
-      "depNameTemplate": "kubernetes/kubernetes",
-      "datasourceTemplate": "github-releases",
-      "extractVersionTemplate": "^v(?<version>.*)$"
-    },
-    {
-      "description": "helm of the devcontainer feature",
-      "customType": "regex",
-      "managerFilePatterns": [
-        ".devcontainer/snatcharr/devcontainer.json"
-      ],
-      "matchStrings": [
-        "\"helm\": \"(?<currentValue>[0-9.]+)\""
-      ],
-      "depNameTemplate": "helm/helm",
-      "datasourceTemplate": "github-releases",
-      "extractVersionTemplate": "^v(?<version>.*)$"
-    },
-    {
-      "description": "The Postgres of the integration tests and the end-to-end smoke, pinned by version and digest outside a workflow or Dockerfile (storetest, tools/e2e/postgres.sh, Makefile); same image as the CI service containers",
-      "customType": "regex",
-      "managerFilePatterns": [
-        "api/internal/store/storetest/storetest.go",
-        "tools/e2e/postgres.sh",
-        "Makefile"
-      ],
-      "matchStrings": [
-        "(?<depName>(?:mirror\\.gcr\\.io/library/)?postgres):(?<currentValue>[0-9]+-alpine)@(?<currentDigest>sha256:[a-f0-9]{64})"
-      ],
-      "datasourceTemplate": "docker",
-      "versioningTemplate": "docker"
-    },
-    {
-      "description": "The CloudNativePG operand images of the chart upgrade test, pinned by version and digest (tools/e2e/cnpg_pg_upgrade.sh, #252)",
-      "customType": "regex",
-      "managerFilePatterns": [
-        "tools/e2e/cnpg_pg_upgrade.sh"
-      ],
-      "matchStrings": [
-        "(?:OLD|NEW)_IMAGE=(?<depName>ghcr\\.io/cloudnative-pg/postgresql):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})\\n"
-      ],
-      "datasourceTemplate": "docker",
-      "versioningTemplate": "docker"
-    },
-    {
-      "description": "The S3 store of the chart backup and restore test, pinned by version and digest (tools/e2e/cnpg_backup_restore.sh, C14-04)",
-      "customType": "regex",
-      "managerFilePatterns": [
-        "tools/e2e/cnpg_backup_restore.sh"
-      ],
-      "matchStrings": [
-        "RUSTFS_IMAGE=(?<depName>mirror\\.gcr\\.io/rustfs/rustfs):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})\\n"
-      ],
-      "datasourceTemplate": "docker",
-      "versioningTemplate": "docker"
-    },
-    {
-      "description": "cert-manager and the Barman Cloud plugin the deploy job installs for the backup and restore test, pinned by release (.github/workflows/ci.yml)",
+      "description": "The scanner images in CI workflow, pinned by version and digest (tools/ci/semgrep_scan.py, tools/ci/trivy_scan.py)",
       "customType": "regex",
       "managerFilePatterns": [
         ".github/workflows/ci.yml"
       ],
       "matchStrings": [
-        "https://github\\.com/(?<depName>cert-manager/cert-manager|cloudnative-pg/plugin-barman-cloud)/releases/download/(?<currentValue>v[0-9.]+)/"
-      ],
-      "datasourceTemplate": "github-releases"
-    },
-    {
-      "description": "The Playwright image of the visual baseline, pinned by version and digest (web/e2e/visual-image.env, tools/e2e/web_visual.sh); its version must equal @playwright/test",
-      "customType": "regex",
-      "managerFilePatterns": [
-        "web/e2e/visual-image.env"
-      ],
-      "matchStrings": [
-        "PLAYWRIGHT_IMAGE=(?<depName>mcr\\.microsoft\\.com/playwright):(?<currentValue>v[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})\\n"
+        "(?:SEMGREP|TRIVY)_IMAGE: (?:mirror\\.gcr\\.io/)?(?<depName>semgrep/semgrep|aquasec/trivy):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
       ],
       "datasourceTemplate": "docker",
-      "versioningTemplate": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-(?<compatibility>.+)$"
+      "versioningTemplate": "docker"
     }
-  ],
-  "postUpdateOptions": [
-    "gomodTidy",
-    "pnpmDedupe"
   ],
   "packageRules": [
     {
       "description": "One weekly pull request per manager for non-major updates, so the strict up-to-date rule reruns CI once per group (HISS-18)",
       "matchManagers": [
-        "gomod"
+        "nuget"
       ],
       "matchUpdateTypes": [
         "minor",
@@ -198,35 +67,7 @@
         "pin",
         "pinDigest"
       ],
-      "groupName": "gomod non-major"
-    },
-    {
-      "description": "One weekly pull request per manager for non-major updates, so the strict up-to-date rule reruns CI once per group (HISS-18)",
-      "matchManagers": [
-        "cargo"
-      ],
-      "matchUpdateTypes": [
-        "minor",
-        "patch",
-        "digest",
-        "pin",
-        "pinDigest"
-      ],
-      "groupName": "cargo non-major"
-    },
-    {
-      "description": "One weekly pull request per manager for non-major updates, so the strict up-to-date rule reruns CI once per group (HISS-18)",
-      "matchManagers": [
-        "npm"
-      ],
-      "matchUpdateTypes": [
-        "minor",
-        "patch",
-        "digest",
-        "pin",
-        "pinDigest"
-      ],
-      "groupName": "npm non-major"
+      "groupName": "nuget non-major"
     },
     {
       "description": "One weekly pull request per manager for non-major updates, so the strict up-to-date rule reruns CI once per group (HISS-18)",
@@ -243,97 +84,6 @@
       "groupName": "github-actions non-major"
     },
     {
-      "description": "One weekly pull request per manager for non-major updates, so the strict up-to-date rule reruns CI once per group (HISS-18)",
-      "matchManagers": [
-        "dockerfile"
-      ],
-      "matchUpdateTypes": [
-        "minor",
-        "patch",
-        "digest",
-        "pin",
-        "pinDigest"
-      ],
-      "groupName": "dockerfile non-major"
-    },
-    {
-      "description": "One weekly pull request per manager for non-major updates, so the strict up-to-date rule reruns CI once per group (HISS-18)",
-      "matchManagers": [
-        "docker-compose"
-      ],
-      "matchUpdateTypes": [
-        "minor",
-        "patch",
-        "digest",
-        "pin",
-        "pinDigest"
-      ],
-      "groupName": "docker-compose non-major"
-    },
-    {
-      "description": "One weekly pull request per manager for non-major updates, so the strict up-to-date rule reruns CI once per group (HISS-18)",
-      "matchManagers": [
-        "helm-values"
-      ],
-      "matchUpdateTypes": [
-        "minor",
-        "patch",
-        "digest",
-        "pin",
-        "pinDigest"
-      ],
-      "groupName": "helm-values non-major"
-    },
-    {
-      "description": "One weekly pull request per manager for non-major updates, so the strict up-to-date rule reruns CI once per group (HISS-18)",
-      "matchManagers": [
-        "helmv3"
-      ],
-      "matchUpdateTypes": [
-        "minor",
-        "patch",
-        "digest",
-        "pin",
-        "pinDigest"
-      ],
-      "groupName": "helmv3 non-major"
-    },
-    {
-      "description": "One weekly pull request per manager for non-major updates, so the strict up-to-date rule reruns CI once per group (HISS-18)",
-      "matchManagers": [
-        "devcontainer"
-      ],
-      "matchUpdateTypes": [
-        "minor",
-        "patch",
-        "digest",
-        "pin",
-        "pinDigest"
-      ],
-      "groupName": "devcontainer non-major"
-    },
-    {
-      "matchPackageNames": [
-        "/^github.com/golusoris//"
-      ],
-      "groupName": "golusoris"
-    },
-    {
-      "matchPackageNames": [
-        "/^@sveltesentio//"
-      ],
-      "groupName": "sveltesentio"
-    },
-    {
-      "matchPackageNames": [
-        "tonic",
-        "tonic-build",
-        "prost",
-        "prost-types"
-      ],
-      "groupName": "tonic"
-    },
-    {
       "description": "Automerge non-major updates once the required checks pass; majors stay manual",
       "matchUpdateTypes": [
         "minor",
@@ -345,15 +95,15 @@
       "automerge": true
     },
     {
-      "description": "Pins a custom manager reads are merged by hand. Upstream spec pins: Renovate cannot renew the sha256 of a spec file (docs/upstream-contracts.md). Workflow gate tools: a new version changes what a required check refuses, so a person reads its release notes",
+      "description": "Pins a custom manager reads are merged by hand. Workflow gate tools: a new version changes what a required check refuses, so a person reads its release notes",
       "matchManagers": [
         "custom.regex"
       ],
-      "groupName": "upstream specs",
+      "groupName": "workflow gate tools",
       "automerge": false
     },
     {
-      "description": "The two images of the workflow gate move in a pull request of their own",
+      "description": "The image of the workflow gate moves in a pull request of its own",
       "matchManagers": [
         "custom.regex"
       ],
@@ -361,102 +111,6 @@
         "tools/ci/tool-versions.env"
       ],
       "groupName": "workflow gate tools"
-    },
-    {
-      "description": "praetor-managed files: praetorctl adopt ships their updates and praetorctl audit locks them byte for byte",
-      "matchFileNames": [
-        ".github/workflows/praetor-api.yml",
-        "tools/apicompat/gate/main.go",
-        "tools/apicompat/gate/placeholder.go",
-        ".devcontainer/devcontainer.json",
-        ".devcontainer/Dockerfile.praetor"
-      ],
-      "enabled": false
-    },
-    {
-      "description": "TypeScript 7 drops the JavaScript compiler API that @sveltejs/kit reads tsconfig through (svelte-kit sync fails with \"Cannot read properties of undefined (reading 'readFile')\"), and @sveltejs/kit 3.1.0 declares the peer range typescript ^6.0.0. Revisit when a released @sveltejs/kit peer range admits typescript 7 (#149)",
-      "matchManagers": [
-        "npm"
-      ],
-      "matchPackageNames": [
-        "typescript"
-      ],
-      "allowedVersions": "<7"
-    },
-    {
-      "description": "The upgrade test moves a database from the previous Postgres major to the current one (storetest.PreviousMajorImage, #252): that pin takes digest and minor updates but stays on major 17. Move it with the current major when Postgres 19 is adopted",
-      "matchFileNames": [
-        "api/internal/store/storetest/storetest.go"
-      ],
-      "matchDepNames": [
-        "postgres"
-      ],
-      "matchCurrentValue": "/^17-/",
-      "allowedVersions": "/^17-/"
-    },
-    {
-      "description": "The chart upgrade test moves a CloudNativePG cluster from the previous Postgres major to the current one (tools/e2e/cnpg_pg_upgrade.sh, #252): each operand pin takes digest and minor updates on its own major. Move both, with old_major and new_major, when Postgres 19 is adopted",
-      "matchFileNames": [
-        "tools/e2e/cnpg_pg_upgrade.sh"
-      ],
-      "matchDepNames": [
-        "ghcr.io/cloudnative-pg/postgresql"
-      ],
-      "matchCurrentValue": "/^17\\./",
-      "allowedVersions": "/^17\\./"
-    },
-    {
-      "description": "See the rule above: the current-major operand pin of the chart upgrade test stays on 18",
-      "matchFileNames": [
-        "tools/e2e/cnpg_pg_upgrade.sh"
-      ],
-      "matchDepNames": [
-        "ghcr.io/cloudnative-pg/postgresql"
-      ],
-      "matchCurrentValue": "/^18\\./",
-      "allowedVersions": "/^18\\./"
-    },
-    {
-      "description": "linuxserver keeps old Ubuntu-base tags 18.04.1 / 20.04.1 that read as majors (dashboard #55 proposed deluge v18, qbittorrent v20)",
-      "matchDatasources": [
-        "docker"
-      ],
-      "matchDepNames": [
-        "docker.io/linuxserver/deluge",
-        "docker.io/linuxserver/qbittorrent",
-        "linuxserver/deluge",
-        "linuxserver/qbittorrent"
-      ],
-      "allowedVersions": "!/^\\d+\\.04\\./"
-    },
-    {
-      "description": "linuxserver/qbittorrent also keeps the 14.x tags of its 2022 libtorrent builds (14.3.9 = qBittorrent 4.3.9, pushed 2022-01-06), which read as a major above 5.x (#518 proposed v14). This rule replaces the one above for qbittorrent, so it repeats the Ubuntu-base exclusion",
-      "matchDatasources": [
-        "docker"
-      ],
-      "matchDepNames": [
-        "docker.io/linuxserver/qbittorrent",
-        "linuxserver/qbittorrent"
-      ],
-      "allowedVersions": "!/^(\\d+\\.04\\.|14\\.)/"
-    },
-    {
-      "description": "@playwright/test and the Playwright image of the visual baseline move together: tools/e2e/web_visual.sh refuses an image whose version differs from the lockfile",
-      "matchDepNames": [
-        "@playwright/test",
-        "mcr.microsoft.com/playwright"
-      ],
-      "groupName": "playwright"
-    },
-    {
-      "description": "The Docker datasource dates tags only on Docker Hub, so under minimumReleaseAge the Playwright image never counts as stable and the group above shipped @playwright/test alone (#411). The image needs no age gate of its own: tools/e2e/web_visual.sh refuses an image whose version differs from @playwright/test in the lockfile, and that npm package keeps the 3-day gate, so the image cannot land before its npm twin has aged",
-      "matchDatasources": [
-        "docker"
-      ],
-      "matchDepNames": [
-        "mcr.microsoft.com/playwright"
-      ],
-      "minimumReleaseAgeBehaviour": "timestamp-optional"
     }
   ],
   "platformCommit": "enabled",

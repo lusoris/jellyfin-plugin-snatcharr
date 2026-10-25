@@ -47,13 +47,7 @@
     ".": {
       "initial-version": "0.1.0",
       "bump-minor-pre-major": true,
-      "bump-patch-for-minor-pre-major": true,
-      "extra-files": [
-        {
-          "type": "generic",
-          "path": "deploy/helm/snatcharr/Chart.yaml"
-        }
-      ]
+      "bump-patch-for-minor-pre-major": true
     }
   }
 }

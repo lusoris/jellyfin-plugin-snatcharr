@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 lusoris <lusoris@pm.me>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+version = 1
+
+# Plugin code and everything written for this repository: GPL-3.0-or-later, the licence of
+# jellyfin/jellyfin-plugin-template (decision record: lusoris/SnatchArr ADR-0028).
+[[annotations]]
+path = ["**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 lusoris <lusoris@pm.me>"
+SPDX-License-Identifier = "GPL-3.0-or-later"
+
+# Configuration copied from lusoris/SnatchArr at commit 86dc3376 (EUPL-1.2, same author).
+# JSON carries no comment header, so its licence is declared here.
+[[annotations]]
+path = ["renovate.json", "release-please-config.json"]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 lusoris <lusoris@pm.me>"
+SPDX-License-Identifier = "EUPL-1.2"

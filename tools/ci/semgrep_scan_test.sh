@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: EUPL-1.2
 #
 # Planted cases for semgrep_scan.py: a minimal repository with one rule, one fixture and one
-# Go file, unchanged and with one defect planted at a time. A stub stands in for docker, so no
+# C# file, unchanged and with one defect planted at a time. A stub stands in for docker, so no
 # image is pulled; it logs every call, and a defect in the rules, the fixtures or the image
 # reference must be refused before the stub runs.
 #
@@ -36,7 +36,7 @@ while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
 shift
 case "$STUB_MODE" in
   clean) jq -n '{results: [], errors: [], paths: {scanned: $ARGS.positional}}' --args "$@" ;;
-  finding) jq -n '{results: [{path: "main.go", start: {line: 1}, check_id: "demo-rule",
+  finding) jq -n '{results: [{path: "main.cs", start: {line: 1}, check_id: "demo-rule",
                    extra: {message: "planted"}}], errors: [], paths: {scanned: $ARGS.positional}}' --args "$@" ;;
   skipped) jq -n '{results: [], errors: [], paths: {scanned: []}}' ;;
   no-json) echo "not a report" ;;
@@ -47,21 +47,28 @@ chmod +x "$STUB"
 
 RULES='rules:
   - id: demo-rule
-    languages: [go]
+    languages: [csharp]
     severity: ERROR
     message: planted
-    pattern: panic(...)
+    pattern: System.Console.WriteLine(...)
 '
-FIXTURE='//go:build semgrep_fixture
+FIXTURE='// SPDX-FileCopyrightText: 2026 lusoris <lusoris@pm.me>
+// SPDX-License-Identifier: GPL-3.0-or-later
 
-package fixture
+#if SEMGREP_FIXTURE
 
-func f() {
-	// ruleid: demo-rule
-	panic("x")
-	// ok: demo-rule
-	println("x")
+namespace Fixture;
+
+class Program {
+    void Main() {
+        // ruleid: demo-rule
+        System.Console.WriteLine("x");
+        // ok: demo-rule
+        System.Console.Write("x");
+    }
 }
+
+#endif
 '
 
 # fresh DIR: a clean repository the scan accepts.
@@ -69,8 +76,7 @@ fresh() {
   rm -rf "$1"
   mkdir -p "$1/tools/ci/semgrep/testdata"
   printf '%s' "$RULES" > "$1/.semgrep.yml"
-  printf '%s' "$FIXTURE" > "$1/tools/ci/semgrep/testdata/demo-rule.go"
-  printf 'package main\n\nfunc main() {}\n' > "$1/main.go"
+  printf '%s' "$FIXTURE" > "$1/tools/ci/semgrep/testdata/demo-rule.cs"
   git -C "$1" init --quiet
   git -C "$1" add -A
 }
@@ -114,7 +120,9 @@ expect() {
 
 FX=tools/ci/semgrep/testdata
 
-expect 0 "clean repository" clean yes "Semgrep: 1 files scanned, 0 findings"
+expect 0 "clean repository without C# files" clean yes "0 C# files outside testdata, skipping tree scan"
+expect 0 "clean repository with C# file" clean yes "Semgrep: 1 files scanned, 0 findings" \
+  'printf "class C {}\n" > main.cs && git add main.cs'
 
 # Defects refused before any docker call.
 IMAGE_OVERRIDE="semgrep/semgrep:1.180.0" expect 1 "image pinned by tag only" clean no "is not pinned"
@@ -123,28 +131,33 @@ IMAGE_OVERRIDE="semgrep/semgrep@sha256:529ee8a277ec8adc5b534d7c74eea0a47e9de21d6
 expect 1 "no rule declared" clean no "declares no rule" 'printf "rules: []\n" > .semgrep.yml'
 expect 1 "rule id declared twice" clean no "declares a rule id twice" \
   'printf "  - id: demo-rule\n    pattern: x\n" >> .semgrep.yml'
-expect 1 "no fixture" clean no "0 fixtures, expected 1 to 64" "rm $FX/demo-rule.go"
+expect 1 "no fixture" clean no "0 fixtures, expected 1 to 64" "rm $FX/demo-rule.cs"
 expect 1 "65 fixtures" clean no "65 fixtures, expected 1 to 64" \
-  "i=0; while [ \$i -lt 64 ]; do cp $FX/demo-rule.go $FX/copy-\$i.go; i=\$((i + 1)); done"
-expect 1 "fixture without the build constraint" clean no "does not start with '//go:build semgrep_fixture'" \
-  "sed -i 1d $FX/demo-rule.go"
-expect 1 "constraint not on the first line" clean no "does not start with" \
-  "sed -i '1i // leading comment' $FX/demo-rule.go"
+  "i=0; while [ \$i -lt 64 ]; do cp $FX/demo-rule.cs $FX/copy-\$i.cs; i=\$((i + 1)); done"
+expect 1 "fixture without the build constraint" clean no "first non-header line is not '#if SEMGREP_FIXTURE'" \
+  "sed -i '/#if SEMGREP_FIXTURE/d' $FX/demo-rule.cs"
+expect 1 "constraint not on the first non-header line" clean no "first non-header line is not '#if SEMGREP_FIXTURE'" \
+  "sed -i 's/#if SEMGREP_FIXTURE/using System;/' $FX/demo-rule.cs"
+expect 1 "fixture missing endif" clean no "missing '#endif'" \
+  "sed -i '/#endif/d' $FX/demo-rule.cs"
 expect 1 "annotation names an unknown rule" clean no "annotation names unknown rule 'other-rule'" \
-  "printf '// ok: other-rule\n' >> $FX/demo-rule.go"
+  "printf '// ok: other-rule\n' >> $FX/demo-rule.cs"
 expect 1 "rule without a ruleid line" clean no 'no `ruleid:` fixture line for rule(s): demo-rule' \
-  "sed -i '/ruleid:/d' $FX/demo-rule.go"
+  "sed -i '/ruleid:/d' $FX/demo-rule.cs"
 expect 1 "rule without an ok line" clean no 'no `ok:` fixture line for rule(s): demo-rule' \
-  "sed -i '/ok:/d' $FX/demo-rule.go"
+  "sed -i '/ok:/d' $FX/demo-rule.cs"
 expect 1 "second rule without a fixture" clean no "fixture line for rule(s): second-rule" \
   'printf "  - id: second-rule\n    pattern: x\n" >> .semgrep.yml'
 
 # Defects only Semgrep's own answer reveals.
-expect 1 "fixture replay fails" fixture-fails yes "fixture tools/ci/semgrep/testdata/demo-rule.go did not pass (exit 1)"
-expect 1 "scan reports a finding" finding yes "1 finding(s), 0 error(s)"
-expect 1 "scan skips a file" skipped yes "report scanned 0 of 1 files; not scanned: ['main.go']"
-expect 1 "scan prints no report" no-json yes "no JSON report"
-expect 1 "clean report, failing exit" exit-2 yes "semgrep exited 2 with a clean report"
-expect 1 "no Go file to scan" clean yes "0 Go files to scan, expected 1 to 4096" 'git rm --quiet --cached main.go'
+expect 1 "fixture replay fails" fixture-fails yes "fixture tools/ci/semgrep/testdata/demo-rule.cs did not pass (exit 1)"
+expect 1 "scan reports a finding" finding yes "1 finding(s), 0 error(s)" \
+  'printf "class C {}\n" > main.cs && git add main.cs'
+expect 1 "scan skips a file" skipped yes "report scanned 0 of 1 files; not scanned: ['main.cs']" \
+  'printf "class C {}\n" > main.cs && git add main.cs'
+expect 1 "scan prints no report" no-json yes "no JSON report" \
+  'printf "class C {}\n" > main.cs && git add main.cs'
+expect 1 "clean report, failing exit" exit-2 yes "semgrep exited 2 with a clean report" \
+  'printf "class C {}\n" > main.cs && git add main.cs'
 
 echo "semgrep scan: $accepted accepted, $refused refused"

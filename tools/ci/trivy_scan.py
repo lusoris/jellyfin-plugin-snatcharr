@@ -1,19 +1,16 @@
+# SPDX-FileCopyrightText: 2026 lusoris <lusoris@pm.me>
+# SPDX-License-Identifier: EUPL-1.2
 """Run Trivy in its digest-pinned image over the tracked files, planted case first.
 
-The planted tree holds a go.mod that requires a vulnerable golang.org/x/text, a
-Dockerfile that runs as root and an AWS key pair; Trivy must report all three
-before the scan of the tracked files is trusted. That scan covers vulnerable Go
-modules, Rust crates and pnpm packages, secrets, and misconfigurations in the
-Dockerfiles and the Helm chart.
+The planted tree holds a packages.lock.json pinning a vulnerable Newtonsoft.Json
+and an AWS key pair; Trivy must report both before the scan of the tracked files
+is trusted. That scan covers vulnerable NuGet packages and secrets.
 
 The real scan fails on any HIGH or CRITICAL finding that has a fix, on any
-Trivy error, and on a report that leaves out a tracked go.mod, Cargo.lock,
-pnpm-lock.yaml or Dockerfile. No .trivyignore is read, so no finding is excepted.
+Trivy error, and on a report that leaves out a tracked packages.lock.json.
+No .trivyignore is read, so no finding is excepted.
 
-Copied from tekmora/discord-bot tools/ci/trivy_scan.py (EUPL-1.2, same author)
-at commit 70642249adc9d99375b707cebe0eb756970905cc. Changed here: this
-docstring, the cache volume name, the lockfiles the report must cover, and the
-image mode is left out because no job here scans a built image.
+Adapted from lusoris/SnatchArr at 86dc3376 (EUPL-1.2, same author).
 
 Usage: python3 -I tools/ci/trivy_scan.py --trivy NAME:TAG@sha256:DIGEST
 """
@@ -29,7 +26,7 @@ import tarfile
 import tempfile
 
 IMAGE_RE = re.compile(r"^[a-z0-9./-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$")
-CACHE_VOLUME = "snatcharr-trivy-cache"
+CACHE_VOLUME = "jellyfin-plugin-snatcharr-trivy-cache"
 TIMEOUT_SECONDS = 900
 MAX_FILES = 4096
 MAX_REPORT_BYTES = 64 * 1024 * 1024
@@ -37,9 +34,24 @@ SCAN_FLAGS = ["--scanners", "vuln,secret,misconfig", "--severity", "HIGH,CRITICA
               "--ignore-unfixed", "--ignorefile", "", "--skip-version-check",
               "--disable-telemetry", "--format", "json", "--exit-code", "1"]
 # Trivy result type of each lockfile the report must cover.
-LOCKFILES = {"gomod": "go.mod", "cargo": "Cargo.lock", "pnpm": "pnpm-lock.yaml"}
+LOCKFILES = {"nuget": "packages.lock.json"}
 # Unpacks the tar on stdin and runs trivy on it; arguments come in as "$@".
 UNPACK_AND_SCAN = "mkdir -p /scan && tar -xf - -C /scan && cd /scan && exec trivy \"$@\""
+
+NUGET_LOCK = """{
+  "version": 1,
+  "dependencies": {
+    "net10.0": {
+      "Newtonsoft.Json": {
+        "type": "Direct",
+        "requested": "[12.0.1, )",
+        "resolved": "12.0.1",
+        "contentHash": "pCOyUR190f89U0bdaafnf/yqDMnkzP3y0/33Q0/qblUmsPddYmpxGbeRe1U9S8s4mZymw1rS3n/w2849T9/lDg=="
+      }
+    }
+  }
+}
+"""
 
 
 class ScanError(Exception):
@@ -106,8 +118,7 @@ def planted_tree(directory):
     key_id = "".join(("AKIA", "Z7Q3XWERT5YUIOPA"))
     key_value = "/".join(("wJalrXUtnFEMI", "K7MDENG", "bPxRfiCYZXAMPLEKEYQ"))
     files = {
-        "go.mod": "module example.com/planted\n\ngo 1.22\n\nrequire golang.org/x/text v0.3.0\n",
-        "Dockerfile": "FROM debian:13\nRUN apt-get update\n",
+        "packages.lock.json": NUGET_LOCK,
         "config.env": f"aws_access_key_id = {key_id}\naws_secret_access_key = {key_value}\n",
     }
     for name, text in files.items():
@@ -120,10 +131,10 @@ def self_test_fs(docker, trivy):
         directory = pathlib.Path(temp)
         report = trivy_fs(docker, trivy, tar_of(directory, planted_tree(directory)))
     reported = {target for target, _, _, _ in findings(report)}
-    missing = sorted({"go.mod", "Dockerfile", "config.env"} - reported)
+    missing = sorted({"packages.lock.json", "config.env"} - reported)
     if missing:
         raise ScanError(f"planted case(s) not reported: {', '.join(missing)}")
-    print(f"Trivy fs self-test: planted module, Dockerfile and key reported "
+    print(f"Trivy fs self-test: planted lockfile and key reported "
           f"({len(findings(report))} findings)")
 
 
@@ -135,11 +146,6 @@ def tracked(root):
     if not names or len(names) > MAX_FILES:
         raise ScanError(f"{len(names)} tracked files, expected 1 to {MAX_FILES}")
     return names
-
-
-def is_dockerfile(name):
-    base = pathlib.PurePosixPath(name).name
-    return base == "Dockerfile" or base.startswith("Dockerfile.") or base.endswith(".Dockerfile")
 
 
 def fail_on(found):
@@ -155,15 +161,12 @@ def scan_fs(docker, trivy, root):
     fail_on(findings(report))
     expected = {kind: {n for n in names if pathlib.PurePosixPath(n).name == base}
                 for kind, base in LOCKFILES.items()}
-    expected["dockerfile"] = {n for n in names if is_dockerfile(n)}
     missing = sorted(name for kind, wanted in expected.items()
                      for name in wanted - set(by_type(report, kind)))
-    empty = sorted(kind for kind, wanted in expected.items() if not wanted)
-    if missing or empty:
-        raise ScanError(f"report left out: {missing}; no tracked input of type: {empty}")
+    if missing:
+        raise ScanError(f"report left out: {missing}")
     counts = ", ".join(f"{len(wanted)} {kind}" for kind, wanted in sorted(expected.items()))
     print(f"Trivy fs: {len(names)} tracked files ({counts}), 0 findings")
-
 
 
 def parse_args():

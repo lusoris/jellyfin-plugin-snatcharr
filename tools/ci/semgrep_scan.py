@@ -1,15 +1,17 @@
+# SPDX-FileCopyrightText: 2026 lusoris <lusoris@pm.me>
+# SPDX-License-Identifier: EUPL-1.2
 """Run the repository's Semgrep rules in a digest-pinned image, fixtures first.
 
 Each rule in .semgrep.yml needs a fixture in tools/ci/semgrep/testdata/ with at
 least one `// ruleid:` line it must report and one `// ok:` line it must not.
-Every fixture starts with the `//go:build semgrep_fixture` constraint, so no Go
-build, vet or gosec run ever loads the code the rules are meant to report.
+Every fixture starts with the `#if SEMGREP_FIXTURE` constraint, so no C#
+build ever loads the code the rules are meant to report.
 Semgrep's test mode replays every fixture; only when all pass is the scan of
-the tracked Go files trusted. The scan fails on any finding, on any Semgrep
+the tracked C# files trusted. The scan fails on any finding, on any Semgrep
 error, and when the report does not list exactly the files that were passed.
 
-Copied from tekmora/discord-bot tools/ci/semgrep_scan.py (EUPL-1.2, same author)
-at commit 70642249adc9d99375b707cebe0eb756970905cc. Changed here: this paragraph.
+Rules and fixtures written for this repository; scanner adapted from
+lusoris/SnatchArr at 86dc3376 (EUPL-1.2, same author).
 
 Usage: python3 -I tools/ci/semgrep_scan.py --image NAME:TAG@sha256:DIGEST
 """
@@ -23,7 +25,7 @@ import sys
 
 RULES = ".semgrep.yml"
 FIXTURES = "tools/ci/semgrep/testdata"
-FIXTURE_CONSTRAINT = "//go:build semgrep_fixture\n"
+FIXTURE_CONSTRAINT = "#if SEMGREP_FIXTURE"
 MAX_FIXTURES = 64
 MAX_TARGETS = 4096
 TIMEOUT_SECONDS = 600
@@ -61,15 +63,30 @@ def rule_ids(root):
     return set(ids)
 
 
+def check_fixture_constraint(path):
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    first_non_header = None
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("//"):
+            continue
+        first_non_header = stripped
+        break
+    if first_non_header != FIXTURE_CONSTRAINT:
+        raise ScanError(f"{path.name}: first non-header line is not {FIXTURE_CONSTRAINT!r}")
+    if not any(line.strip() == "#endif" for line in lines):
+        raise ScanError(f"{path.name}: missing '#endif'")
+
+
 def fixtures(root, ids):
-    files = sorted((root / FIXTURES).glob("*.go"))
+    files = sorted((root / FIXTURES).glob("*.cs"))
     if not files or len(files) > MAX_FIXTURES:
         raise ScanError(f"{FIXTURES}: {len(files)} fixtures, expected 1 to {MAX_FIXTURES}")
     seen = {"ruleid": set(), "ok": set()}
     for path in files:
+        check_fixture_constraint(path)
         text = path.read_text(encoding="utf-8")
-        if not text.startswith(FIXTURE_CONSTRAINT):
-            raise ScanError(f"{path.name}: does not start with {FIXTURE_CONSTRAINT.strip()!r}")
         for kind, rule in ANNOTATION_RE.findall(text):
             if rule not in ids:
                 raise ScanError(f"{path.name}: annotation names unknown rule '{rule}'")
@@ -92,17 +109,20 @@ def self_test(docker, image, root, ids):
 
 
 def targets(root):
-    listed = run(["git", "ls-files", "-z", "--", "*.go"], root)
+    listed = run(["git", "ls-files", "-z", "--", "*.cs"], root)
     if listed.returncode != 0:
         raise ScanError(f"git ls-files failed: {listed.stderr.strip()}")
     names = [n for n in listed.stdout.split("\0") if n and not n.startswith(FIXTURES + "/")]
-    if not names or len(names) > MAX_TARGETS:
-        raise ScanError(f"{len(names)} Go files to scan, expected 1 to {MAX_TARGETS}")
+    if len(names) > MAX_TARGETS:
+        raise ScanError(f"{len(names)} C# files to scan, expected 0 to {MAX_TARGETS}")
     return names
 
 
 def scan(docker, image, root):
     names = targets(root)
+    if not names:
+        print("Semgrep: 0 C# files outside testdata, skipping tree scan")
+        return
     result = semgrep(docker, image, root,
                      ["scan", "--config", RULES, "--error", "--strict", "--json", *SEMGREP_FLAGS, "--", *names])
     try:
