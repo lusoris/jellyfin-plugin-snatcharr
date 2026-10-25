@@ -12,7 +12,11 @@ The design is [ADR-0028](https://github.com/lusoris/SnatchArr/blob/main/docs/adr
 
 ## Licence
 
-GPL-3.0-or-later (see [LICENSE](LICENSE)). The plugin links against the GPL-licensed Jellyfin assemblies and follows the licence of [jellyfin/jellyfin-plugin-template](https://github.com/jellyfin/jellyfin-plugin-template).
+This repository is licensed GPL-3.0-or-later (see [LICENSE](LICENSE)). The licence covers the plugin code and everything written for this repository.
+
+- **Why GPL:** the plugin loads into the Jellyfin server and links against its GPL-licensed assemblies, so the plugin and Jellyfin form one combined work. GPL-3.0-or-later is also the licence of [jellyfin/jellyfin-plugin-template](https://github.com/jellyfin/jellyfin-plugin-template), whose notice this repository carries.
+- **Why it differs from SnatchArr:** SnatchArr itself is EUPL-1.2. The plugin's licence was chosen once, on 2026-10-24, because of the Jellyfin linkage. It is a permanent choice, not a temporary exception.
+- **Copied tooling:** the CI, scanner and commit-message files copied from SnatchArr keep their EUPL-1.2 licence. [REUSE.toml](REUSE.toml) and each file's header say which licence applies, and `reuse lint` checks this on every pull request.
 
 ## Plugin identity
 
