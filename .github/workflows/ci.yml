@@ -1,0 +1,160 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+# A pull request push supersedes its previous run. A main push or a rerun is never
+# cancelled and never waits: each main run gets its own group, since a shared group
+# would still cancel a pending run when a third one queues.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  commits:
+    name: Commit messages (Conventional Commits + DCO)
+    # Bots (release-please, Renovate) run no commit-msg hook and cannot certify a DCO; the
+    # squash commit a maintainer merges carries the sign-off for them.
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - &stop-draft
+        name: Stop on a draft pull request
+        if: github.event.pull_request.draft == true
+        shell: bash
+        env:
+          TITLE: Gate not run on a draft
+          MESSAGE: >-
+            The gate did not run because the pull request is a draft.
+            It runs when the pull request is marked ready for review.
+        run: |
+          echo "::error title=$TITLE::$MESSAGE"
+          echo "$MESSAGE" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check the policy against its cases
+        run: sh .config/hooks/commit-msg_test.sh
+      # The same script the commit-msg hook runs, applied to every commit of the pull request.
+      - name: Check every commit of the pull request
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          status=0
+          for c in $(git rev-list --no-merges --max-count=500 "$BASE..$HEAD"); do
+            git log -1 --format=%B "$c" > "$RUNNER_TEMP/msg"
+            if ! sh .config/hooks/commit-msg.sh "$RUNNER_TEMP/msg"; then
+              echo "::error title=Commit message::$c fails the commit-msg policy"
+              status=1
+            fi
+          done
+          exit "$status"
+
+  # Runs on every change, with no filter.
+  workflows:
+    name: Workflows (actionlint, pinned actions)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - *stop-draft
+      - &checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The aggregate rule refuses its planted cases
+        run: sh tools/ci/status_test.sh
+      - name: The workflow check refuses its planted cases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tools/ci/workflow-check_test.sh
+      - name: Lint workflows and check action pins
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tools/ci/workflow-check.sh
+
+  # The three scanners run on every change, with no filter: a secret or a vulnerable lockfile can
+  # arrive in any path. Each script first scans a case planted at run time and fails unless the
+  # scanner reports it; only then is the scan of the repository trusted.
+  secret-scan:
+    name: Secrets (gitleaks, full history)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - *stop-draft
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan the history for secrets
+        # The gitleaks pin lives in the script.
+        run: sh tools/ci/gitleaks_scan.sh "$RUNNER_TEMP/gitleaks"
+
+  semgrep:
+    name: Semgrep (own rules, .semgrep.yml)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - *stop-draft
+      - *checkout
+      - name: The scan script refuses its planted cases
+        run: sh tools/ci/semgrep_scan_test.sh
+      - name: Replay the rule fixtures, then scan the tracked C# files
+        # No rule pack is fetched from the registry; the fixtures sit in tools/ci/semgrep/testdata.
+        env:
+          SEMGREP_IMAGE: semgrep/semgrep:1.180.0@sha256:529ee8a277ec8adc5b534d7c74eea0a47e9de21d62852b6ba7ac6ba9566845c3
+        run: |
+          set -euo pipefail
+          docker pull --quiet "$SEMGREP_IMAGE"
+          python3 -I tools/ci/semgrep_scan.py --image "$SEMGREP_IMAGE"
+
+  trivy:
+    name: Trivy (lockfiles, secrets)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - *stop-draft
+      - *checkout
+      - name: Scan the tracked files
+        # HIGH and CRITICAL findings with a fix fail the job; no .trivyignore is read.
+        env:
+          TRIVY_IMAGE: mirror.gcr.io/aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+        run: |
+          set -euo pipefail
+          docker pull --quiet "$TRIVY_IMAGE"
+          python3 -I tools/ci/trivy_scan.py --trivy "$TRIVY_IMAGE"
+
+  # The required check that stands for every job of this workflow. Reads every result
+  # (tools/ci/status.sh). A new job needs a line here and a rule there; the workflows job
+  # fails until both exist.
+  status:
+    name: CI success
+    if: always()
+    needs:
+      - commits
+      - workflows
+      - secret-scan
+      - semgrep
+      - trivy
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check every job result
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          # The condition of the commits job, word for word.
+          COMMITS_EXPECTED: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.type != 'Bot' }}
+        run: sh tools/ci/status.sh

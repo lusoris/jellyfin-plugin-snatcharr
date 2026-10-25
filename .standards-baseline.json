@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "generated_at": "2026-10-25T20:13:24Z",
+  "repository": "lusoris/jellyfin-plugin-snatcharr",
+  "commit_sha": "8a20f9e9517cf1d1930b9629852fc239f0cba188",
+  "total_infractions": 1,
+  "infractions": [
+    {
+      "rule_id": "HISS-07",
+      "file_path": "tools/ci/workflow-check_test.sh",
+      "line_number": 238,
+      "message": "'|| true' discards the command's failure; handle the exit status or test the condition instead",
+      "anchor": "text:82fa4320b4bd",
+      "fingerprint": "tools/ci/workflow-check_test.sh:HISS-07:text:82fa4320b4bd#1"
+    }
+  ]
+}

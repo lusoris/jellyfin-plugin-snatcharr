@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: 2026 lusoris <lusoris@pm.me>
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Semgrep rules for this repository, run by tools/ci/semgrep_scan.py in the
+# digest-pinned Semgrep image (the semgrep job in .github/workflows/ci.yml).
+#
+# Rules are written for this repository, tooling copied from lusoris/SnatchArr
+# at 86dc3376 (EUPL-1.2, same author). Each rule has a fixture under
+# tools/ci/semgrep/testdata/ named after it: lines marked `ruleid:` must be
+# reported and lines marked `ok:` must not. The scan script replays every
+# fixture before it scans the tree, so a rule that stops firing fails the job.
+#
+# Every rule gives zero findings on the tree; a finding is a regression.
+rules:
+  # ── HISS-02 · an HTTP client carries timeouts and uses sockets properly ─────
+  # Direct instantiation of HttpClient can lead to socket exhaustion and lacks
+  # Jellyfin's client configuration. Inject IHttpClientFactory instead.
+  - id: no-new-httpclient
+    languages: [csharp]
+    severity: ERROR
+    message: >-
+      Do not instantiate HttpClient with new HttpClient(...). Inject
+      IHttpClientFactory or use an injected HttpClient instead (HISS-02
+      timeouts + socket reuse).
+    pattern-either:
+      - pattern: new HttpClient(...)
+      - pattern: new System.Net.Http.HttpClient(...)
+
+  # ── HISS-02 · deterministic time via TimeProvider ──────────────────────────
+  # Using system wall-clock time directly prevents deterministic unit and
+  # integration testing. Inject TimeProvider instead.
+  - id: no-datetime-now
+    languages: [csharp]
+    severity: ERROR
+    message: >-
+      DateTime.Now, DateTime.UtcNow, DateTimeOffset.Now, and
+      DateTimeOffset.UtcNow are refused. Inject TimeProvider instead for
+      deterministic testing.
+    pattern-either:
+      - pattern: DateTime.Now
+      - pattern: DateTime.UtcNow
+      - pattern: DateTimeOffset.Now
+      - pattern: DateTimeOffset.UtcNow
+      - pattern: System.DateTime.Now
+      - pattern: System.DateTime.UtcNow
+      - pattern: System.DateTimeOffset.Now
+      - pattern: System.DateTimeOffset.UtcNow
+
+  # ── HISS-08 · no dynamic exec ──────────────────────────────────────────────
+  # Jellyfin plugins run inside the media server process and must not spawn
+  # external processes or shell commands.
+  - id: no-process-start
+    languages: [csharp]
+    severity: ERROR
+    message: >-
+      Process.Start(...) and new ProcessStartInfo(...) are refused (HISS-08
+      no dynamic exec). Spawning external processes is not permitted.
+    pattern-either:
+      - pattern: Process.Start(...)
+      - pattern: System.Diagnostics.Process.Start(...)
+      - pattern: new ProcessStartInfo(...)
+      - pattern: new System.Diagnostics.ProcessStartInfo(...)
+
+  # ── HISS-08 · no dynamic code loading ──────────────────────────────────────
+  # Dynamically loading assemblies or instantiating types by string bypasses
+  # compile-time validation and allows loading untrusted code.
+  - id: no-assembly-load
+    languages: [csharp]
+    severity: ERROR
+    message: >-
+      Assembly.Load*(...) and Activator.CreateInstance(...) with a string type
+      are refused (HISS-08 no dynamic code loading).
+    pattern-either:
+      - pattern: Assembly.Load(...)
+      - pattern: Assembly.LoadFrom(...)
+      - pattern: Assembly.LoadFile(...)
+      - pattern: Assembly.LoadWithPartialName(...)
+      - pattern: Assembly.LoadFromAssemblyName(...)
+      - pattern: System.Reflection.Assembly.Load(...)
+      - pattern: System.Reflection.Assembly.LoadFrom(...)
+      - pattern: System.Reflection.Assembly.LoadFile(...)
+      - pattern: System.Reflection.Assembly.LoadWithPartialName(...)
+      - pattern: System.Reflection.Assembly.LoadFromAssemblyName(...)
+      - pattern: Activator.CreateInstance((string $A), ...)
+      - pattern: Activator.CreateInstance($A, (string $B), ...)
+      - pattern: System.Activator.CreateInstance((string $A), ...)
+      - pattern: System.Activator.CreateInstance($A, (string $B), ...)
+      - pattern: Activator.CreateInstanceFrom(...)
+      - pattern: System.Activator.CreateInstanceFrom(...)

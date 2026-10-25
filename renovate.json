@@ -1,0 +1,134 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "github>plurano/horistes",
+    ":semanticCommits",
+    "helpers:pinGitHubActionDigests",
+    "docker:pinDigests"
+  ],
+  "timezone": "Europe/Berlin",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "enabledManagers": [
+    "nuget",
+    "github-actions",
+    "pip_requirements",
+    "custom.regex"
+  ],
+  "customManagers": [
+    {
+      "description": "The image of the workflow gate, pinned by version and digest on one line (tools/ci/workflow-check.sh)",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "tools/ci/tool-versions.env"
+      ],
+      "matchStrings": [
+        "ACTIONLINT_IMAGE=mirror\\.gcr\\.io/(?<depName>rhysd/actionlint):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})\\n"
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    },
+    {
+      "description": "gitleaks release archive in tools/ci/gitleaks_scan.sh",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "tools/ci/gitleaks_scan.sh"
+      ],
+      "matchStrings": [
+        "GITLEAKS_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)\\n"
+      ],
+      "depNameTemplate": "gitleaks/gitleaks",
+      "datasourceTemplate": "github-releases"
+    },
+    {
+      "description": "The scanner images in CI workflow, pinned by version and digest (tools/ci/semgrep_scan.py, tools/ci/trivy_scan.py)",
+      "customType": "regex",
+      "managerFilePatterns": [
+        ".github/workflows/ci.yml"
+      ],
+      "matchStrings": [
+        "(?:SEMGREP|TRIVY)_IMAGE: (?:mirror\\.gcr\\.io/)?(?<depName>semgrep/semgrep|aquasec/trivy):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "One weekly pull request per manager for non-major updates, so the strict up-to-date rule reruns CI once per group (HISS-18)",
+      "matchManagers": [
+        "nuget"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest",
+        "pin",
+        "pinDigest"
+      ],
+      "groupName": "nuget non-major"
+    },
+    {
+      "description": "One weekly pull request per manager for non-major updates, so the strict up-to-date rule reruns CI once per group (HISS-18)",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest",
+        "pin",
+        "pinDigest"
+      ],
+      "groupName": "github-actions non-major"
+    },
+    {
+      "description": "Automerge non-major updates once the required checks pass; majors stay manual",
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest",
+        "pin",
+        "pinDigest"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "Pins a custom manager reads are merged by hand. Workflow gate tools: a new version changes what a required check refuses, so a person reads its release notes",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "groupName": "workflow gate tools",
+      "automerge": false
+    },
+    {
+      "description": "The image of the workflow gate moves in a pull request of its own",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchFileNames": [
+        "tools/ci/tool-versions.env"
+      ],
+      "groupName": "workflow gate tools"
+    },
+    {
+      "description": "praetor-managed files: praetorctl adopt ships their updates and praetorctl audit locks them byte for byte",
+      "matchFileNames": [
+        ".devcontainer/devcontainer.json",
+        ".devcontainer/Dockerfile.praetor",
+        ".github/workflows/reuse.yml",
+        ".config/reuse/requirements.txt"
+      ],
+      "enabled": false
+    }
+  ],
+  "platformCommit": "enabled",
+  "vulnerabilityAlerts": {
+    "groupName": null,
+    "schedule": [
+      "at any time"
+    ],
+    "minimumReleaseAge": null
+  }
+}
