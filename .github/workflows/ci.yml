@@ -1,0 +1,926 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+# A pull request push supersedes its previous run. A main push or a rerun is never
+# cancelled and never waits: each main run gets its own group, since a shared group
+# would still cancel a pending run when a third one queues.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  commits:
+    name: Commit messages (Conventional Commits + DCO)
+    # Bots (release-please, Renovate) run no commit-msg hook and cannot certify a DCO; the
+    # squash commit a maintainer merges carries the sign-off for them.
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - &stop-draft
+        name: Stop on a draft pull request
+        if: github.event.pull_request.draft == true
+        shell: bash
+        env:
+          TITLE: Gate not run on a draft
+          MESSAGE: >-
+            The gate did not run because the pull request is a draft.
+            It runs when the pull request is marked ready for review.
+        run: |
+          echo "::error title=$TITLE::$MESSAGE"
+          echo "$MESSAGE" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check the policy against its cases
+        run: sh .config/hooks/commit-msg_test.sh
+      # The same script the commit-msg hook runs, applied to every commit of the pull request.
+      - name: Check every commit of the pull request
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          status=0
+          for c in $(git rev-list --no-merges --max-count=500 "$BASE..$HEAD"); do
+            git log -1 --format=%B "$c" > "$RUNNER_TEMP/msg"
+            if ! sh .config/hooks/commit-msg.sh "$RUNNER_TEMP/msg"; then
+              echo "::error title=Commit message::$c fails the commit-msg policy"
+              status=1
+            fi
+          done
+          exit "$status"
+
+  # Runs on every change, with no filter: a change that touches no component skips the jobs
+  # below, and the workflow files are then all that is left to gate.
+  workflows:
+    name: Workflows (actionlint, pinned actions)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - *stop-draft
+      - &checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The aggregate rule refuses its planted cases
+        run: sh tools/ci/status_test.sh
+      - name: The Security Scan issue step behaves on its planted cases
+        run: sh tools/ci/security_issue_test.sh
+      - name: The workflow check refuses its planted cases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tools/ci/workflow-check_test.sh
+      - name: Lint workflows and check action pins
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tools/ci/workflow-check.sh
+
+  # The three scanners run on every change, with no filter: a secret or a vulnerable lockfile can
+  # arrive in any path. Each script first scans a case planted at run time and fails unless the
+  # scanner reports it; only then is the scan of the repository trusted.
+  secret-scan:
+    name: Secrets (gitleaks, full history)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - *stop-draft
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan the history for secrets
+        # Findings excepted by fingerprint or path and rule, each with a reason and an expiry:
+        # .gitleaksignore. The gitleaks pin lives in the script, which `make secret-scan` runs too.
+        run: sh tools/ci/gitleaks_scan.sh "$RUNNER_TEMP/gitleaks"
+
+  semgrep:
+    name: Semgrep (own rules, .semgrep.yml)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - *stop-draft
+      - *checkout
+      - name: The scan script refuses its planted cases
+        run: sh tools/ci/semgrep_scan_test.sh
+      - name: Replay the rule fixtures, then scan the tracked Go files
+        # No rule pack is fetched from the registry; the fixtures sit in tools/ci/semgrep/testdata.
+        env:
+          SEMGREP_IMAGE: semgrep/semgrep:1.180.0@sha256:529ee8a277ec8adc5b534d7c74eea0a47e9de21d62852b6ba7ac6ba9566845c3
+        run: |
+          set -euo pipefail
+          docker pull --quiet "$SEMGREP_IMAGE"
+          python3 -I tools/ci/semgrep_scan.py --image "$SEMGREP_IMAGE"
+
+  trivy:
+    name: Trivy (lockfiles, secrets, Dockerfiles, Helm chart)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - *stop-draft
+      - *checkout
+      - name: Scan the tracked files
+        # HIGH and CRITICAL findings with a fix fail the job; no .trivyignore is read.
+        env:
+          TRIVY_IMAGE: mirror.gcr.io/aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+        run: |
+          set -euo pipefail
+          docker pull --quiet "$TRIVY_IMAGE"
+          python3 -I tools/ci/trivy_scan.py --trivy "$TRIVY_IMAGE"
+
+  # Every component job needs this one, so its draft step holds all of them back on a draft:
+  # GitHub skips them, and the CI success job fails on this job's failure (#147).
+  changes:
+    name: Detect changed components
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      # A component runs when it changed. A missing manifest fails its job instead of skipping it.
+      api: ${{ steps.filter.outputs.api }}
+      worker: ${{ steps.filter.outputs.worker }}
+      web: ${{ steps.filter.outputs.web }}
+      proto: ${{ steps.filter.outputs.proto }}
+      deploy: ${{ steps.filter.outputs.deploy }}
+      governance: ${{ steps.filter.outputs.governance }}
+      contracts: ${{ steps.filter.outputs.contracts }}
+      docs: ${{ steps.filter.outputs.docs }}
+      licences: ${{ steps.filter.outputs.licences }}
+    steps:
+      - *stop-draft
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            api:
+              - 'api/**'
+              - 'go.mod'
+              - 'go.sum'
+              - 'proto/**'
+              - '.golangci.yml'
+              - '.gosec.json'
+              - 'tools/spectral.yaml'
+              - 'tools/spectral/**'
+              - 'tools/cover/**'
+              - 'tools/e2e/**'
+              - 'tools/**/*.go'
+              - 'tools/go/**'
+              - 'tools/ci/lint_exceptions*.sh'
+              - 'Makefile'
+              - 'Dockerfile'
+              - '.github/workflows/ci.yml'
+            worker:
+              - 'worker/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'rustfmt.toml'
+              - 'deny.toml'
+              - 'proto/**'
+              # The coverage floor: worker-cover and tools/cover.
+              - 'Makefile'
+              - 'tools/cover/**'
+              - '.github/workflows/ci.yml'
+            web:
+              - 'web/**'
+              - 'api/openapi/**'
+              - 'tools/ci/prettier_ignore_test.sh'
+              - 'tools/ci/web_strings_scan.py'
+              - 'tools/e2e/web_visual.sh'
+              - 'tools/e2e/planted.sh'
+              - '.github/workflows/ci.yml'
+            proto:
+              - 'proto/**'
+              - '.github/workflows/ci.yml'
+            deploy:
+              - 'deploy/**'
+              - 'tools/deploy/**'
+              - 'tools/e2e/cnpg_pg_upgrade.sh'
+              - 'tools/e2e/cnpg_backup_restore.sh'
+              - 'tools/e2e/cnpg_lib.sh'
+              - 'tools/e2e/chart_install.sh'
+              - 'tools/e2e/fingerprint.sql'
+              - 'tools/e2e/dev_compose_smoke.sh'
+              - 'tools/e2e/planted.sh'
+              # The deploy job installs the chart on images built from these (#144).
+              - 'Dockerfile'
+              - 'worker/Dockerfile'
+              - 'Makefile'
+              - '.github/workflows/ci.yml'
+            governance:
+              - 'AGENTS.md'
+              - 'CLAUDE.md'
+              - '.standards*'
+              - '.needs.yaml'
+              - 'Makefile'
+              - 'lefthook.yml'
+              - '.config/**'
+              - '.gemini/**'
+              - '.codex/**'
+              - '.github/workflows/ci.yml'
+            contracts:
+              - 'tools/upstreamspec/**'
+              - 'renovate.json'
+              - 'api/internal/seerrclient/**'
+              - 'worker/crates/arr-client/**'
+              - 'worker/crates/snatch-core/**'
+              - 'go.mod'
+              - 'go.sum'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.gitignore'
+              - '.dockerignore'
+              - 'Makefile'
+              - '.github/workflows/ci.yml'
+            docs:
+              - 'docs/**'
+              - 'mkdocs.yml'
+              - 'tools/docs/**'
+              - '.github/workflows/ci.yml'
+            licences:
+              - 'go.mod'
+              - 'go.sum'
+              - 'tools/go/go.mod'
+              - 'tools/go/go.sum'
+              - 'Cargo.toml'
+              - 'worker/crates/*/Cargo.toml'
+              - 'Cargo.lock'
+              - 'about.toml'
+              - 'web/package.json'
+              - 'web/pnpm-lock.yaml'
+              - 'tools/licences/**'
+              - 'web/static/licences.json'
+              - 'Makefile'
+              - '.github/workflows/ci.yml'
+
+  # The Go jobs mirror golusoris' reusable ci-go.yml but pin tool versions that build with
+  # Go 1.27 (the reusable workflow's govulncheck 1.4.0 panics on grpc-go generics).
+  api-lint:
+    name: api / lint
+    needs: changes
+    if: needs.changes.outputs.api == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-go
+      - name: go.mod and go.sum are tidy
+        # A dependency update that leaves a requirement unused, or marked indirect while the code
+        # imports it, still builds; this prints the missing changes and fails.
+        run: go mod tidy -diff
+      - name: golangci-lint
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+          golangci-lint run --config ../.golangci.yml --timeout 10m ./...
+      - name: golangci-lint over tools/
+        # The same config from the module root, without and with the apicompatgate build tag. A
+        # finding passes only with a dated entry in the generated block of .golangci.yml, which
+        # tools/ci/lint_exceptions.sh checks with praetorctl at the pinned engine.
+        working-directory: ${{ github.workspace }}
+        run: make tools-lint
+      - name: go fix (modernizers) leaves no diff
+        run: go fix -diff ./...
+      # go generate rewrites the ogen server and the sqlc queries (#178); the proto job compares
+      # internal/gen. Untracked generated files fail as well: git diff does not see them.
+      - name: Generated code is committed
+        run: |
+          go generate ./...
+          git diff --exit-code -- internal/build internal/store/sqlcgen
+          if git ls-files --others --exclude-standard -- internal/build internal/store/sqlcgen | grep .; then
+            echo "::error::generated files above are not committed"; exit 1
+          fi
+
+  api-test:
+    name: api / test (race + coverage)
+    env:
+      # The Postgres integration tests (api/internal/store/storetest) start containers through
+      # testcontainers; pull its Docker Hub images (postgres, ryuk) from the mirror.
+      TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: mirror.gcr.io
+    needs: changes
+    if: needs.changes.outputs.api == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-go
+      - name: go vet + build
+        run: cd api && go vet ./... && go build ./...
+      - name: go test -race
+        run: cd api && go test -race -count=1 -timeout 10m ./...
+      - name: go vet + go test -race over tools/
+        run: make tools-test
+      - name: Coverage ratchet (non-generated packages)
+        run: make api-cover
+
+  api-security:
+    name: api / security (gosec + govulncheck)
+    needs: changes
+    if: needs.changes.outputs.api == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-go
+      - name: gosec (zero exclusions)
+        # From the module root: started in api/, gosec loads no package and passes on zero files.
+        working-directory: ${{ github.workspace }}
+        run: |
+          make gosec-install
+          make api-gosec
+          # api-gosec scans tools/ without the apicompatgate build tag; this is the scan with it.
+          make tools-gosec
+      - name: Upload gosec results to code scanning
+        # Also after a finding, so the alert shows on the pull request. A pull request from a fork
+        # has a read-only token and cannot upload; the gosec step above still decides the job.
+        if: >-
+          ${{ !cancelled() && hashFiles('api/tmp/gosec.sarif') != ''
+          && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: api/tmp/gosec.sarif
+          category: gosec/api
+      - name: gosec annotations of generated code
+        # Each finding in ogen, sqlc and protoc-gen-go output carries one `#nosec <rule> -- <reason>`
+        # from tools/gennosec, and no annotation outlives its finding.
+        run: go run ../tools/gennosec check
+      - name: govulncheck
+        # The target make api-verify runs: the tools/go/go.mod pin, its version printed first (#161).
+        run: make -C .. api-vuln
+
+  api-openapi:
+    name: api / OpenAPI lint (spectral)
+    needs: changes
+    if: needs.changes.outputs.api == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Planted cases (each bad spec fails on its rule)
+        run: sh tools/spectral/lint_test.sh
+      - name: Spectral
+        run: sh tools/spectral/lint.sh api/openapi/openapi.yaml
+
+  worker:
+    name: worker (Rust)
+    needs: changes
+    if: needs.changes.outputs.worker == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The runner's rustup installs the release pinned in rust-toolchain.toml.
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install --component llvm-tools-preview
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy (zero warnings)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo test --workspace --locked
+      # Prebuilt, checksum-verified binaries from GitHub releases. cargo-deny-action built a
+      # container from Docker Hub on every run and failed on its anonymous pull limit (429).
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-audit,cargo-deny,cargo-llvm-cov@0.9.1
+          fallback: none
+      - name: cargo-audit
+        run: cargo audit
+      - name: cargo-deny
+        run: cargo deny check
+      - name: Coverage (line floor)
+        run: make worker-cover
+
+  e2e:
+    name: e2e (smoke)
+    needs: changes
+    if: needs.changes.outputs.api == 'true' || needs.changes.outputs.worker == 'true' || needs.changes.outputs.proto == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    services:
+      # The Postgres the integration tests pin, through the Docker Hub mirror.
+      postgres: &postgres
+        image: mirror.gcr.io/library/postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+        env:
+          POSTGRES_PASSWORD: smoke
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-go
+      # The runner's rustup installs the release pinned in rust-toolchain.toml.
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Postgres, the API, two workers and two fakearr instances: lease, stamina and dispatch
+      # together (#19). The same target runs locally.
+      - name: make e2e-smoke
+        env:
+          SMOKE_DSN: postgres://postgres:smoke@127.0.0.1:5432/postgres?sslmode=disable
+        run: make e2e-smoke
+
+  image-smoke:
+    name: image smoke (containers + SPA)
+    needs: changes
+    if: needs.changes.outputs.api == 'true' || needs.changes.outputs.worker == 'true' || needs.changes.outputs.proto == 'true' || needs.changes.outputs.web == 'true' || needs.changes.outputs.deploy == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    services:
+      # The Postgres the integration tests pin, through the Docker Hub mirror.
+      postgres: *postgres
+    steps:
+      - *stop-draft
+      - *checkout
+      - uses: ./.github/actions/setup-go
+      - uses: ./.github/actions/setup-buildx
+      - name: Build api image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: snatcharr-api:e2e
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,scope=api,mode=max
+      - name: Build worker image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: worker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: snatcharr-worker:e2e
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,scope=worker,mode=max
+      - name: make e2e-image-smoke
+        env:
+          SMOKE_DSN: postgres://postgres:smoke@127.0.0.1:5432/postgres?sslmode=disable
+          SMOKE_SKIP_BUILD: '1'
+        run: make e2e-image-smoke
+      # The release's arm64 image check, run here on the amd64 images: a changed startup error
+      # of the API then fails this pull request, not the release (0.2.0 did). Its allow-list
+      # cases first; then an architecture mismatch that must be refused.
+      - name: Image check (release arm64 check on amd64)
+        run: |
+          bash tools/e2e/arm64-check_test.sh
+          CHECK_ARCH=amd64 tools/e2e/arm64-check.sh snatcharr-api:e2e snatcharr-worker:e2e
+          if out=$(tools/e2e/arm64-check.sh api snatcharr-api:e2e 2>&1); then
+            echo "::error::planted: an amd64 image passed the arm64 check"
+            exit 1
+          fi
+          case "$out" in
+            *"architecture is 'amd64', want arm64"*) echo "ok   planted architecture mismatch refused" ;;
+            *) echo "::error::planted: refused for another reason: $out"; exit 1 ;;
+          esac
+      # The homelab bundle (deploy/homelab) on the images built above, with the API and worker
+      # health checks the pinned release images cannot run yet (#41).
+      - name: make e2e-compose-smoke
+        env:
+          SMOKE_SKIP_BUILD: '1'
+          SMOKE_POSTGRES_MIRROR: mirror.gcr.io/library
+        run: make e2e-compose-smoke
+      # The same bundle installed on the previous Postgres major and upgraded by the documented
+      # steps, with data read-back and two planted skipped steps (#252).
+      - name: make e2e-compose-pg-upgrade
+        env:
+          SMOKE_SKIP_BUILD: '1'
+          SMOKE_POSTGRES_MIRROR: mirror.gcr.io/library
+        run: make e2e-compose-pg-upgrade
+
+  dev-compose:
+    name: dev compose (make dev stack)
+    needs: changes
+    if: needs.changes.outputs.deploy == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - *stop-draft
+      - *checkout
+      # deploy/compose with the arr and observability profiles, as `make dev` and docs/metrics.md
+      # start it, after two planted defects the smoke must refuse (gap audit C9-08).
+      - name: make e2e-dev-compose-smoke
+        run: make e2e-dev-compose-smoke
+
+  dlclients-live:
+    name: download clients (real releases)
+    needs: changes
+    if: needs.changes.outputs.api == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - *stop-draft
+      - *checkout
+      - uses: ./.github/actions/setup-go
+      # Each supported download client as a real release, observed by the production adapters,
+      # after two planted defects the test must refuse (gap audit C9-05).
+      - name: make dlclients-live
+        run: make dlclients-live
+
+  arr-forceimport-live:
+    name: force import (real Sonarr and Radarr)
+    needs: changes
+    if: needs.changes.outputs.api == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - *stop-draft
+      - *checkout
+      - uses: ./.github/actions/setup-go
+      # Rule id_matched (ADR-0013) on real Sonarr and Radarr: the production client
+      # force-imports an ID-matched release after four planted cases it must refuse.
+      - name: make arr-forceimport-live
+        run: make arr-forceimport-live
+
+  integrations-live:
+    name: integrations (real app containers)
+    needs: changes
+    if: needs.changes.outputs.api == 'true' || needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - *stop-draft
+      - *checkout
+      - uses: ./.github/actions/setup-go
+      # All supported integrations driven end to end against real application
+      # containers, after four planted defects the test must refuse.
+      - name: make integrations-live
+        run: make integrations-live
+
+  web:
+    name: web (SvelteKit)
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    uses: golusoris/sveltesentio/.github/workflows/ci-sveltekit.yml@5b3b01ef8b0bd664acfa621eeb84a1c7e626e7da # main 2026-09-21
+    with:
+      node-version: '24'
+      working-directory: web
+      coverage-threshold: 50
+      run-e2e: true
+
+  web-e2e-api:
+    name: web e2e (API + axe)
+    needs: changes
+    if: needs.changes.outputs.api == 'true' || needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    services:
+      # The Postgres the integration tests pin, through the Docker Hub mirror.
+      postgres: *postgres
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-go
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Install Playwright browsers
+        run: cd web && pnpm install --frozen-lockfile && pnpm exec playwright install --with-deps chromium
+      # The repository's own web checks of make web-verify, which the shared sveltesentio
+      # workflow of the web job does not run: the Prettier ignore cases (C11-05) and the
+      # untranslated-string scan with its planted fixtures (B6-03).
+      - name: web checks (Prettier ignore, untranslated strings)
+        working-directory: web
+        run: |
+          sh ../tools/ci/prettier_ignore_test.sh
+          python3 ../tools/ci/web_strings_scan.py
+      - name: make web-e2e-api
+        env:
+          SMOKE_DSN: postgres://postgres:smoke@127.0.0.1:5432/postgres?sslmode=disable
+        run: make web-e2e-api
+
+  web-visual:
+    name: web visual baseline
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - *stop-draft
+      - *checkout
+      # /login and /setup in en and de, light and dark, inside the Playwright image pinned in
+      # web/e2e/visual-image.env, after two planted visual changes the comparison must refuse
+      # (gap audit C15-03).
+      - name: make web-visual
+        run: make web-visual
+
+  proto:
+    name: proto (buf)
+    needs: changes
+    if: needs.changes.outputs.proto == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: bufbuild/buf-action@85aebf73123b5c15fd5528aaecbf9129cddf7fa7 # v1.6.0
+        with:
+          input: proto
+          lint: true
+          format: true
+          breaking: ${{ github.event_name == 'pull_request' }}
+          breaking_against: ${{ github.event.repository.clone_url }}#format=git,commit=${{ github.event.pull_request.base.sha }},subdir=proto
+          push: false
+          archive: false
+          # The workflow token is read-only; results go to the job log instead of a PR comment.
+          pr_comment: false
+      - name: Generated Go stubs are committed
+        # make proto-gen = buf generate + the HISS-09 SAFETY post-pass; raw buf generate would drift.
+        run: make proto-gen && git diff --exit-code -- api/internal/gen
+
+  deploy:
+    name: deploy (Helm)
+    needs: changes
+    if: needs.changes.outputs.deploy == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      # Pinned release tarball, checksum from the release's checksums.txt (no install action
+      # covers kustomize).
+      - name: kustomize v5.8.2
+        env:
+          KUSTOMIZE_SHA256: 06af0a202c2b831207d0173f9c9cdb1b30abceca0747cb3fbb72792d26055c95
+        run: |
+          curl -fsSL --max-time 60 -o "$RUNNER_TEMP/kustomize.tgz" \
+            https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.8.2/kustomize_v5.8.2_linux_amd64.tar.gz
+          echo "$KUSTOMIZE_SHA256  $RUNNER_TEMP/kustomize.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/kustomize.tgz" -C "$RUNNER_TEMP" kustomize
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      # Pinned release tarball. Helm v4 checks a plugin's .prov signature by default, and the runner
+      # holds no keyring for its signer, so the pinned sha256 is the integrity check, as for
+      # kustomize above; --verify=false only skips the keyring step.
+      - name: helm-unittest v1.2.1
+        env:
+          HELM_UNITTEST_SHA256: bbcebd42631dff9fc595462fad839c49a1b06f9635e952e7e837d7e5fe82865f
+        run: |
+          curl -fsSL --max-time 60 -o "$RUNNER_TEMP/unittest.tgz" \
+            https://github.com/helm-unittest/helm-unittest/releases/download/v1.2.1/unittest-1.2.1.tgz
+          echo "$HELM_UNITTEST_SHA256  $RUNNER_TEMP/unittest.tgz" | sha256sum -c -
+          helm plugin install "$RUNNER_TEMP/unittest.tgz" --verify=false
+      # The same checks as locally: strict lint, kubeconform on the default and all-features
+      # renders (kubeconform runs from its pinned image), the kind overlay build and the render
+      # guards (#116).
+      - name: make deploy-verify
+        run: make deploy-verify
+      # kubeconform checks schemas only. The API server also validates semantics, such as an
+      # ipBlock `except` having to lie inside its `cidr`, which shipped broken in 0.1.0. kind
+      # runs here on the disposable runner only; locally it runs inside an incus VM (#61).
+      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          cluster_name: chart-check
+          # Same image kind v0.33.0 pins, from mirror.gcr.io: Docker Hub's anonymous pull limit
+          # failed this step on shared runner IPs.
+          node_image: mirror.gcr.io/kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+      - name: CloudNativePG operator (its CRDs and webhooks validate the Cluster)
+        run: |
+          kubectl apply --server-side -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.28/releases/cnpg-1.28.0.yaml
+          kubectl -n cnpg-system rollout status deploy/cnpg-controller-manager --timeout=180s
+      - name: server-side dry run (default and all-features renders)
+        run: |
+          kubectl create namespace snatcharr
+          # Planted first (C11-04): the NetworkPolicies of the published 0.1.0 chart put an
+          # except outside its cidr (#90); the dry run must refuse them for that reason.
+          helm template snatcharr oci://ghcr.io/lusoris/charts/snatcharr --version 0.1.0 \
+            --namespace snatcharr --set networkPolicy.enabled=true \
+            --show-only templates/networkpolicy.yaml >"$RUNNER_TEMP/planted-netpol.yaml"
+          if kubectl apply --dry-run=server --namespace snatcharr -f "$RUNNER_TEMP/planted-netpol.yaml" \
+            >"$RUNNER_TEMP/planted.log" 2>&1; then
+            echo "planted: the 0.1.0 NetworkPolicies passed the server-side dry run" >&2
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/planted.log"
+          grep -q 'strict subset' "$RUNNER_TEMP/planted.log"
+          echo "ok   planted 0.1.0 NetworkPolicies refused"
+          helm template snatcharr deploy/helm/snatcharr --namespace snatcharr \
+            | kubectl apply --dry-run=server --namespace snatcharr -f -
+          helm template snatcharr deploy/helm/snatcharr --namespace snatcharr \
+            --set networkPolicy.enabled=true --set api.ingress.enabled=true \
+            --set worker.autoscaling.enabled=true --set api.pdb.enabled=true --set worker.pdb.enabled=true \
+            --set configarr.enabled=true --set configarr.existingConfigMap=cfg --set configarr.existingSecret=sec \
+            --set 'networkPolicy.arrCidrs={10.0.0.0/8,0.0.0.0/0}' \
+            --set-json 'networkPolicy.arrPeers=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"media"}}},{"podSelector":{"matchLabels":{"app.kubernetes.io/name":"lidarr"}},"ports":[{"port":8686,"protocol":"TCP"}]}]' \
+            | kubectl apply --dry-run=server --namespace snatcharr -f -
+      # The upgrade test runs the chart on the images of this checkout: on a release pull request
+      # the chart already pins the new appVersion, whose images are not published yet. Read-only
+      # use of the image-smoke build cache.
+      - uses: ./.github/actions/setup-buildx
+      - uses: ./.github/actions/build-e2e-images
+      - name: Load the images into kind
+        run: kind load docker-image snatcharr-api:e2e snatcharr-worker:e2e --name chart-check
+      # A dry run cannot see a pod that never becomes Ready (0.1.0 shipped one). The chart of this
+      # checkout installed with its defaults and upgraded from the last published chart, both
+      # waited on until Available with /readyz 200, after a planted install the API refuses (#144).
+      - name: make e2e-chart-install
+        env:
+          CHART_API_IMAGE: snatcharr-api:e2e
+          CHART_WORKER_IMAGE: snatcharr-worker:e2e
+        run: make e2e-chart-install
+      # The chart installed on CloudNativePG with the previous Postgres major and upgraded by
+      # the documented imageName change: data read-back, API back up, and a planted upgrade
+      # without the image change that must be refused (#252).
+      - name: make e2e-cnpg-pg-upgrade
+        env:
+          UPGRADE_API_IMAGE: snatcharr-api:e2e
+          UPGRADE_WORKER_IMAGE: snatcharr-worker:e2e
+        run: make e2e-cnpg-pg-upgrade
+      # The Barman Cloud plugin needs cert-manager for its TLS between operator and sidecar, and
+      # runs in the operator's namespace (the plugin's installation docs). Renovate moves both.
+      - name: cert-manager and the Barman Cloud plugin
+        run: |
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.21.2/cert-manager.yaml
+          kubectl -n cert-manager wait deploy --all --for=condition=Available --timeout=180s
+          curl -fsSL --max-time 60 -o "$RUNNER_TEMP/barman-cloud.yaml" \
+            https://github.com/cloudnative-pg/plugin-barman-cloud/releases/download/v0.15.1/manifest.yaml
+          # The webhook answers a few seconds after it turns Available; its Certificates need it.
+          for i in 1 2 3 4 5 6; do
+            kubectl apply -f "$RUNNER_TEMP/barman-cloud.yaml" && break
+            [ "$i" -lt 6 ] || exit 1
+            sleep 10
+          done
+          kubectl -n cnpg-system rollout status deploy/barman-cloud --timeout=180s
+      # A base backup to an S3 store in the cluster, the database lost, and the documented
+      # restore with data read-back, after a planted reinstall without the recovery (C14-04).
+      - name: make e2e-cnpg-backup-restore
+        env:
+          RESTORE_API_IMAGE: snatcharr-api:e2e
+          RESTORE_WORKER_IMAGE: snatcharr-worker:e2e
+        run: make e2e-cnpg-backup-restore
+
+  # The hand-written clients against the OpenAPI specs their upstream projects publish. The specs
+  # are downloaded at the commits pinned in tools/upstreamspec/specs.yaml and checked against their
+  # sha256; they are never committed (docs/upstream-contracts.md).
+  contracts:
+    name: contracts (pinned upstream specs)
+    needs: changes
+    if: needs.changes.outputs.contracts == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-go
+      # The runner's rustup installs the release pinned in rust-toolchain.toml.
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Clients against the pinned upstream specs
+        run: make contracts-verify
+
+  governance:
+    name: governance (praetor)
+    needs: changes
+    if: needs.changes.outputs.governance == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      # PRAETOR_REF is the repository's engine pin: the git hooks and make read it from here
+      # (.config/lefthook/engine.sh) and run the same engine CI installs. One value only.
+      - name: Install praetorctl
+        env:
+          PRAETOR_REF: 8dacd54b19d527da9318252a43ce6303fed7a0c4
+        run: |
+          go install "github.com/cordanaLLM/praetor/cmd/standardsctl@${PRAETOR_REF}"
+          ln -s "$(go env GOPATH)/bin/standardsctl" "$(go env GOPATH)/bin/praetorctl"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Context integrity
+        run: praetorctl compile-context --verify
+      - name: HISS audit
+        run: praetorctl audit
+      - name: Flavor audit
+        # .workingdir/ ledgers are gitignored by praetor itself; the flavor requires them.
+        run: |
+          praetorctl state init --if-absent .
+          praetorctl flavor audit --flavor=go-service .
+
+  # The build pages.yml deploys from main, run on the pull request: a change that breaks the
+  # docs build fails "CI success" instead of reaching main (gap audit A2-03).
+  docs:
+    name: docs (mkdocs --strict)
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - *checkout
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.15'
+      - name: Install the docs toolchain
+        run: python -m pip install -r tools/docs/requirements.txt
+      - name: Build site
+        # --strict turns every warning into a failure; no -q, which would hide them.
+        run: mkdocs build --strict
+
+  licences:
+    name: third-party licences
+    needs: changes
+    if: needs.changes.outputs.licences == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - *stop-draft
+      - *checkout
+      - uses: ./.github/actions/setup-go
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Install web dependencies
+        run: cd web && pnpm install --frozen-lockfile
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-about@0.9.2
+          fallback: none
+      - name: Third-party licences check
+        run: make licences-check
+
+  # The required check that stands for every job of this workflow. A job the change filter
+  # leaves out ends as skipped, and a skipped job satisfies a required check on its own, so this
+  # job reads every result (tools/ci/status.sh). A new job needs a line here and a rule there;
+  # the workflows job fails until both exist.
+  status:
+    name: CI success
+    if: always()
+    needs:
+      - commits
+      - workflows
+      - secret-scan
+      - semgrep
+      - trivy
+      - changes
+      - api-lint
+      - api-test
+      - api-security
+      - api-openapi
+      - worker
+      - e2e
+      - image-smoke
+      - dev-compose
+      - dlclients-live
+      - arr-forceimport-live
+      - integrations-live
+      - web
+      - web-e2e-api
+      - web-visual
+      - proto
+      - deploy
+      - contracts
+      - governance
+      - docs
+      - licences
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check every job result
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          # The condition of the commits job, word for word.
+          COMMITS_EXPECTED: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.type != 'Bot' }}
+        run: sh tools/ci/status.sh
