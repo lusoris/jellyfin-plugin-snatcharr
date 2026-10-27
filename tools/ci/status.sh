@@ -80,10 +80,18 @@ status_needs() {
 
 # first_steps FILE: "<job>|<name of its first step>" per job of the workflow.
 first_steps() {
-  awk '
+  awk -v draft_step="$DRAFT_STEP" '
     /^jobs:$/ { in_jobs = 1; next }
     in_jobs && /^  [A-Za-z0-9_-]+:$/ { job = substr($0, 3, length($0) - 3); in_steps = 0; seen = 0; next }
     in_jobs && job != "" && /^    steps:$/ { in_steps = 1; next }
+    # SnatchArr'\''s own status mirror proves the called job starts with that step; pinned full sha only.
+    in_jobs && job != "" && /^    uses: / {
+      if (/^    uses: lusoris\/SnatchArr\/\.github\/workflows\/commit-policy\.yml@/) {
+        ref = substr($0, index($0, "@") + 1); sub(/ +#.*$/, "", ref)
+        if (length(ref) == 40 && ref ~ /^[0-9a-f]+$/) print job "|" draft_step
+      }
+      next
+    }
     # A step anchored as &stop-draft names itself on the next line; *stop-draft resolves to that name.
     anchored != "" {
       step = $0
