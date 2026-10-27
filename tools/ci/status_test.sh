@@ -107,6 +107,16 @@ sh "$HERE/status.sh" mirror "$WORKFLOW" > /dev/null
 accepted=$((accepted + 1))
 echo "ok   the CI workflow matches the rule table"
 
+# Renovate keeps a version comment after the pinned sha of a reusable workflow.
+awk '{ sub(/commit-policy\.yml@[0-9a-f]+$/, "& # v0.6.9"); print }' "$WORKFLOW" > "$WORK/ci.yml"
+if cmp -s "$WORKFLOW" "$WORK/ci.yml"; then
+  echo "FAIL version comment: the planted edit changed nothing" >&2
+  exit 1
+fi
+sh "$HERE/status.sh" mirror "$WORK/ci.yml" > /dev/null
+accepted=$((accepted + 1))
+echo "ok   a version comment after the pinned sha"
+
 mirror_refuses "job dropped from the needs of status" "job trivy: not needed by the status job" \
   '!/^      - trivy$/'
 mirror_refuses "job that is not in the rule table" "job stray: no rule in tools/ci/status.sh" \
@@ -131,5 +141,17 @@ mirror_refuses "anchored draft step names another step" \
    { print; prev = $0 }'
 mirror_refuses "expectation of the commits job removed" "status: no COMMITS_EXPECTED expression" \
   '!/^ *COMMITS_EXPECTED: /'
+mirror_refuses "reusable workflow ref is a tag" \
+  'job commits: the first step is not "Stop on a draft pull request"' \
+  '{ sub(/@2bf15d49f0eca695707a999808bccd988e2160e1/, "@v0.6.8"); print }'
+mirror_refuses "reusable workflow is another file" \
+  'job commits: the first step is not "Stop on a draft pull request"' \
+  '{ sub(/commit-policy\.yml@/, "release-please-app.yml@"); print }'
+mirror_refuses "reusable workflow is from another owner" \
+  'job commits: the first step is not "Stop on a draft pull request"' \
+  '{ sub(/lusoris\/SnatchArr\//, "someone/SnatchArr/"); print }'
+mirror_refuses "reusable workflow ref is a short sha" \
+  'job commits: the first step is not "Stop on a draft pull request"' \
+  '{ sub(/@2bf15d49f0eca695707a999808bccd988e2160e1/, "@2bf15d49"); print }'
 
 echo "status rule: $accepted accepted, $refused refused"
